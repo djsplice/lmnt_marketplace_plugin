@@ -20,11 +20,20 @@ class PrintStats:
         self.file_position = 0
         self.file_size = 0
         self.total_duration = 0.
+        self.total_layer = 0  # Total number of layers
+        self.current_layer = 0  # Current layer being printed
+        # Add info field for Mainsail compatibility
+        self.info = {
+            "total_layer": 0,
+            "current_layer": 0
+        }
         self.last_total_duration = 0.
         self.last_print_duration = 0.
         self.last_filament_used = 0.
         self.last_file_position = 0
         self.last_file_size = 0
+        self.last_total_layer = 0
+        self.last_current_layer = 0
         self.last_state = ""
         self.last_message = ""
         self.last_stats_event = 0.
@@ -78,6 +87,18 @@ class PrintStats:
             self.last_message = self.message
             update = True
             logging.debug(f"Message changed: {self.message}")
+        if self.total_layer != self.last_total_layer:
+            self.last_total_layer = self.total_layer
+            # Also update the info field for Mainsail compatibility
+            self.info['total_layer'] = self.total_layer
+            update = True
+            logging.debug(f"Total layer changed: {self.total_layer}")
+        if self.current_layer != self.last_current_layer:
+            self.last_current_layer = self.current_layer
+            # Also update the info field for Mainsail compatibility
+            self.info['current_layer'] = self.current_layer
+            update = True
+            logging.debug(f"Current layer changed: {self.current_layer}")
         if update:
             self.last_stats_event = eventtime
             logging.info(f"Sending notify_status_update: {self.get_status(eventtime)}")
@@ -94,15 +115,30 @@ class PrintStats:
         self.filename = filename
 
     def get_status(self, eventtime):
+        # Defensive: ensure singular/plural layer fields are always present
+        info = dict(self.info) if hasattr(self, 'info') else {}
+        # Singular/plural for total_layer
+        total_layer = getattr(self, 'total_layer', 0) or info.get('total_layer', 0)
+        info['total_layer'] = total_layer
+        info['total_layers'] = total_layer
+        # Singular/plural for current_layer
+        current_layer = getattr(self, 'current_layer', 0) or info.get('current_layer', 0)
+        info['current_layer'] = current_layer
+        info['current_layers'] = current_layer
         return {
             'filename': self.filename,
             'total_duration': self.total_duration,
             'print_duration': self.print_duration,
             'filament_used': self.filament_used,
+            'state': self.state,
+            'message': self.message,
+            'info': info,  # Add info field for Mainsail compatibility
             'file_position': self.file_position,
             'file_size': self.file_size,
-            'state': self.state,
-            'message': self.message
+            'total_layer': total_layer,
+            'total_layers': total_layer,
+            'current_layer': current_layer,
+            'current_layers': current_layer
         }
 
     def reset(self):
@@ -162,24 +198,34 @@ class PrintStats:
 
     cmd_SET_PRINT_STATS_INFO_help = "Set print stats info"
     def cmd_SET_PRINT_STATS_INFO(self, gcmd):
-        printing = gcmd.get_int('PRINTING', None)
+        """Set the current layer and total layer count"""
+        self.current_layer = gcmd.get_int('CURRENT_LAYER', self.current_layer)
+        self.total_layer = gcmd.get_int('TOTAL_LAYER', self.total_layer)
+        # Also update the info field for Mainsail compatibility
+        self.info['current_layer'] = self.current_layer
+        self.info['total_layer'] = self.total_layer
         total_time = gcmd.get_float('TOTAL_TIME', None)
+        if total_time is not None:
+            self.total_duration = total_time
+            logging.debug(f"Updated total_duration to {total_time}")
         print_time = gcmd.get_float('PRINT_TIME', None)
-        total_size = gcmd.get_int('TOTAL_SIZE', None)
-        file_pos = gcmd.get_int('FILE_POSITION', None)
+        if print_time is not None:
+            self.print_duration = print_time
+            logging.debug(f"Updated print_duration to {print_time}")
+        filament_used = gcmd.get_float('FILAMENT_USED', None)
+        if filament_used is not None:
+            self.filament_used = filament_used
+            logging.debug(f"Updated filament_used to {filament_used}")
+        file_size = gcmd.get_int('TOTAL_SIZE', None)
+        if file_size is not None:
+            self.file_size = file_size
+            logging.debug(f"Updated file_size to {file_size}")
+        printing = gcmd.get_int('PRINTING', None)
         if printing is not None:
             if printing == 1 and self.state in ["standby", "complete", "error", "cancelled"]:
                 self.note_start()
             elif printing == 0 and self.state in ["printing", "paused"]:
                 self.note_complete()
-        if total_time is not None:
-            self.total_duration = total_time
-        if print_time is not None:
-            self.print_duration = print_time
-        if total_size is not None:
-            self.file_size = total_size
-        if file_pos is not None:
-            self.file_position = file_pos
         self._update_stats(self.reactor.monotonic())
 
 def load_config(config):
