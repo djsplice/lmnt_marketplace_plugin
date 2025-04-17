@@ -65,11 +65,17 @@ class VirtualSDGCodeProvider:
         return True, "sd_pos=%d" % (self.file_position if not self.is_streaming else self.stream_position,)
 
     def get_status(self, eventtime):
+        # Attempt to use parsed metadata if available
+        metadata = getattr(self, '_metadata', {}) or {}
         return {
             "file_path": self.file_path(),
             "progress": self.progress(),
             "file_position": self.file_position if not self.is_streaming else self.stream_position,
             "file_size": self.file_size if not self.is_streaming else self.stream_size,
+            "current_layer": metadata.get("current_layer", 0),
+            "layer_count": metadata.get("layer_count", 0),
+            "filament_used": metadata.get("filament_used", 0.0),
+            "print_duration": metadata.get("print_duration", 0.0)
         }
 
     def is_active(self):
@@ -252,68 +258,70 @@ class VirtualSDGCodeProvider:
 class VirtualSD:
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.printer.register_event_handler(
-            "klippy:shutdown", self.handle_shutdown
-        )
-        # Print Stat Tracking
-        self.print_stats = self.printer.load_object(config, 'print_stats')
-        # sdcard state
-        self.virtualsd_gcode_provider = VirtualSDGCodeProvider(config)
-        self.sdcard_dirname = self.virtualsd_gcode_provider.sdcard_dirname
-        self.gcode_provider = None
+        self.reactor = self.printer.get_reactor()
+        self.gcode = self.printer.lookup_object('gcode')
+        self.gcode_move = self.printer.load_object(config, 'gcode_move')
+        sdcard_path = config.get('path', '~/printer_data/gcodes')
+        self.sdcard_dirname = os.path.expanduser(sdcard_path)
         # Work timer
         self.reactor = self.printer.get_reactor()
-        self.must_pause_work = self.cmd_from_sd = False
+        self.must_pause_work = False
         self.work_timer = None
-        # Streaming queue
-        self.stream_queue = None
+        # Statistics tracking
+        self.print_stats = self.printer.load_object(config, 'print_stats')
         # Error handling
-        gcode_macro = self.printer.load_object(config, "gcode_macro")
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
-            config, "on_error_gcode", DEFAULT_ERROR_GCODE
-        )
+            config, 'on_error_gcode', '')
+        # G-code provider state
+        self.gcode_provider = None
+        self.virtualsd_gcode_provider = VirtualSDGCodeProvider(config)
+        self.current_file_complete = False
+        self.start_time = None
         # Register commands
-        self.gcode = self.printer.lookup_object("gcode")
-        for cmd in ["M23", "M24", "M25"]:
-            self.gcode.register_command(cmd, getattr(self, "cmd_" + cmd))
         self.gcode.register_command(
-            "SDCARD_RESET_FILE",
-            self.cmd_SDCARD_RESET_FILE,
-            desc=self.cmd_SDCARD_RESET_FILE_help,
-        )
+            'SDCARD_RESET_FILE', self.cmd_SDCARD_RESET_FILE,
+            desc=self.cmd_SDCARD_RESET_FILE_help)
         self.gcode.register_command(
-            "SDCARD_PRINT_FILE",
-            self.cmd_SDCARD_PRINT_FILE,
-            desc=self.cmd_SDCARD_PRINT_FILE_help,
-        )
+            'SDCARD_PRINT_FILE', self.cmd_SDCARD_PRINT_FILE,
+            desc=self.cmd_SDCARD_PRINT_FILE_help)
         self.gcode.register_command(
-            "SDCARD_STREAM_GCODE",
-            self.cmd_SDCARD_STREAM_GCODE,
-            desc=self.cmd_SDCARD_STREAM_GCODE_help,
-        )
-        self.gcode.register_command(
-            "STREAM_GCODE_LINE",
-            self.cmd_STREAM_GCODE_LINE,
-            desc="Stream a single G-code line to the queue",
-        )
+            'SDCARD_STREAM_GCODE', self.cmd_SDCARD_STREAM_GCODE,
+            desc=self.cmd_SDCARD_STREAM_GCODE_help)
+        self.printer.register_event_handler(
+            "klippy:shutdown", self.handle_shutdown)
 
     def handle_shutdown(self):
+        """Handle a shutdown event by stopping any ongoing print."""
         if self.work_timer is not None:
-            self.must_pause_work = True
+            self.work_timer = None
+        if self.gcode_provider is not None:
             self.gcode_provider.handle_shutdown()
+            self.gcode_provider = None
+        self.current_file_complete = False
 
     def stats(self, eventtime):
         if self.work_timer is None:
             return False, ""
+        if self.gcode_provider is None:
+            return False, ""
         return self.gcode_provider.get_stats(eventtime)
 
-    def get_status(self, eventtime):
-        sts = {"is_active": self.is_active()}
-        if self.gcode_provider:
-            sts.update(self.gcode_provider.get_status(eventtime))
-        else:
-            sts.update(self.virtualsd_gcode_provider.get_status(eventtime))
-        return sts
+    def get_status(self, eventtime=None):
+        """Return virtual_sdcard status."""
+        if self.work_timer is None or self.gcode_provider is None:
+            return {
+                'file_path': None,
+                'progress': 0.,
+                'is_active': False,
+                'is_complete': False
+            }
+        return {
+            'file_path': self.gcode_provider.get_name(),
+            'progress': self.gcode_provider.progress(),
+            'is_active': True,
+            'is_complete': self.current_file_complete
+        }
 
     def is_active(self):
         return self.work_timer is not None
@@ -329,8 +337,7 @@ class VirtualSD:
             raise self.gcode.error("SD busy")
         self.must_pause_work = False
         self.work_timer = self.reactor.register_timer(
-            self.work_handler, self.reactor.NOW
-        )
+            self.work_handler, self.reactor.NOW)
 
     def do_cancel(self):
         if self.gcode_provider is not None:
@@ -373,11 +380,14 @@ class VirtualSD:
     )
 
     def cmd_SDCARD_RESET_FILE(self, gcmd):
-        if self.cmd_from_sd:
-            raise gcmd.error("SDCARD_RESET_FILE cannot be run from the sdcard")
-        self._reset_print()
-        self.print_stats.state = "standby"  # Explicitly set state to standby
-        logging.info("Reset printer state to standby")
+        """Reset the current print and clear any state."""
+        if self.work_timer is not None:
+            self.work_timer = None
+        if self.gcode_provider is not None:
+            self.gcode_provider.reset()
+            self.gcode_provider = None
+        self.current_file_complete = False
+        self.print_stats.reset()
         # Force a state update notification
         self.gcode.respond_info("Printer state reset to standby")
         self.reactor.pause(self.reactor.monotonic() + 2.0)  # Add a longer delay
@@ -397,18 +407,42 @@ class VirtualSD:
     )
 
     def cmd_SDCARD_PRINT_FILE(self, gcmd):
+        if self.gcode_provider is not None:
+            raise gcmd.error("SD card print already in progress")
+        filename = gcmd.get("FILE")
+        provider_name = gcmd.get("PROVIDER", "virtualsd")  # Default to virtualsd if not specified
+        
+        if provider_name == "virtualsd":
+            gcode_provider = self.virtualsd_gcode_provider
+        elif provider_name == "encrypted_gcode":
+            # Load the encrypted gcode provider
+            try:
+                config = self.printer.lookup_object('encrypted_gcode')
+                gcode_provider = config
+            except Exception as e:
+                raise gcmd.error(f"Failed to load encrypted_gcode provider: {str(e)}")
+        else:
+            raise gcmd.error(f"Unknown gcode provider: {provider_name}")
+            
+        try:
+            gcode_provider.set_filename(filename)
+            # Initialize print stats
+            self.print_stats.reset()
+            self.start_time = self.reactor.monotonic()
+            self.print_stats.note_start()
+            self.current_file_complete = False
+            # Set filename in print_stats
+            self.print_stats.set_current_file(filename)
+        except Exception as e:
+            raise gcmd.error(f"Unable to load file: {str(e)}")
+            
+        self.gcode_provider = gcode_provider
+        # Register work timer
         if self.work_timer is not None:
-            raise gcmd.error("SD busy")
-        self._reset_print()
-        filename = gcmd.get("FILENAME")
-        if filename[0] == "/":
-            filename = filename[1:]
-        self.virtualsd_gcode_provider.load_file(
-            gcmd, filename, check_subdirs=True
-        )
-        self._set_gcode_provider(self.virtualsd_gcode_provider)
-        self.print_stats.note_start()
-        self.do_resume()
+            raise gcmd.error("SD card print already in progress")
+        self.must_pause_work = False
+        self.work_timer = self.reactor.register_timer(
+            self.work_handler, self.reactor.NOW)
 
     cmd_SDCARD_STREAM_GCODE_help = "Start a print job with a streaming G-code source"
     def cmd_SDCARD_STREAM_GCODE(self, gcmd):
@@ -499,154 +533,122 @@ class VirtualSD:
 
     # Background work timer
     def work_handler(self, eventtime):
-        gcode_mutex = self.gcode.get_mutex()
-        error_message = None
-        if self.gcode_provider.is_streaming and self.stream_queue is not None:
-            # Streaming mode: process G-code lines from the queue
-            max_wait_time = 600  # Increased to 10 minutes to account for delays
-            elapsed_time = 0
-            start_time = self.reactor.monotonic()
-            logging.info("Entering streaming mode in work_handler")
-            # Directly update print_stats state
-            self.print_stats.state = "printing"
-            # Update print duration periodically
-            while not self.must_pause_work and elapsed_time < max_wait_time:
-                # Pause if any other request is pending in the gcode class
-                if gcode_mutex.test():
-                    logging.debug("Pausing work_handler due to gcode mutex")
-                    self.reactor.pause(self.reactor.monotonic() + 0.100)
-                    continue
+        """Perform work on the file"""
+        if self.gcode_provider is None or not hasattr(self.gcode_provider, 'get_gcode'):
+            return self.reactor.NEVER
+
+        if not self.current_file_complete:
+            # Process up to 500 commands or 0.25 seconds
+            start_time = eventtime
+            pos = 0
+            while True:
                 try:
-                    # Get the next G-code line from the queue (non-blocking)
-                    logging.debug("Checking stream_queue for G-code line")
-                    gcode_line = self.stream_queue.get_nowait()
-                    logging.debug(f"Received G-code line from queue: {gcode_line}")
-                    if gcode_line is None:  # End of stream
-                        logging.info("End of G-code stream received")
-                        self.gcode_provider.is_streaming = False
-                        self.print_stats.state = "complete"
-                        self.print_stats.note_complete()
-                        self.gcode.respond_info("Print Complete")
-                        self.gcode.respond_info("Done printing file")
-                        self._reset_print()
-                        self.print_stats.state = "standby"  # Reset state to standby
-                        logging.info("Reset printer state to standby after print completion")
-                        # Force a state update notification
-                        self.gcode.respond_info("Printer state reset to standby")
-                        self.reactor.pause(self.reactor.monotonic() + 2.0)  # Add a longer delay
-                        # Clear any pending G-code or errors
+                    for line in self.gcode_provider.get_gcode():
+                        # Normal processing
                         try:
-                            self.gcode.run_script_from_command("CLEAR_PAUSE")
-                            self.gcode.run_script_from_command("TURN_OFF_HEATERS")
-                            self.gcode.run_script_from_command("SDCARD_RESET_FILE")
-                            logging.info("Cleared Klipper pause state, turned off heaters, and reset file")
+                            self.gcode.run_script(line)
                         except Exception as e:
-                            logging.error(f"Failed to clear Klipper pause state or turn off heaters: {str(e)}")
-                        # Trigger a Klipper event to notify Moonraker
-                        self.printer.send_event("virtual_sdcard:reset_file")
-                        self.work_timer = None
-                        return self.reactor.NEVER
-                    # Dispatch command
-                    self.cmd_from_sd = True
-                    try:
-                        self.gcode.run_script_from_command(gcode_line)
-                        self.gcode_provider.stream_position += len(gcode_line) + 1
-                        # Update print_stats with the current position using set_position
-                        self.print_stats.set_position(self.gcode_provider.stream_position)
-                        # Update print duration
-                        current_time = self.reactor.monotonic()
-                        self.print_stats.print_duration = current_time - start_time
-                        self.print_stats.total_duration = self.print_stats.print_duration
-                    except self.gcode.error as e:
-                        error_message = str(e)
-                        try:
-                            self.gcode.run_script(self.on_error_gcode.render())
-                        except:
-                            logging.exception("virtual_sdcard on_error")
+                            logging.exception("Error running gcode: %s", line)
+                            self.print_stats.note_error(str(e))
+                            return self.reactor.NEVER
+                        pos += 1
+                        if pos >= 500:
+                            break
+                        cur_time = self.reactor.monotonic()
+                        if cur_time > start_time + 0.25:
+                            break
+                    else:
+                        self.current_file_complete = True
+                        logging.info("Finished SD card print")
+                        self.print_stats.note_complete()
                         break
-                    except:
-                        logging.exception("virtual_sdcard dispatch")
-                        break
-                    finally:
-                        self.cmd_from_sd = False
-                except queue.Empty:
-                    # No G-code line available yet; pause briefly and retry
-                    elapsed_time += 0.100  # Increased interval to 0.1 seconds
-                    if elapsed_time >= max_wait_time:
-                        error_message = "Streaming timed out waiting for G-code lines"
-                        logging.error(error_message)
-                        break
-                    # Keep the timer running by returning a future timestamp
-                    logging.debug(f"Queue empty, waiting for G-code lines (elapsed: {elapsed_time}/{max_wait_time} seconds)")
-                    return self.reactor.monotonic() + 0.100
-                except Exception as e:
-                    error_message = str(e)
-                    logging.exception("virtual_sdcard streaming error")
                     break
-        else:
-            # File-based mode: process G-code lines from get_gcode
-            logging.info("Entering file-based mode in work_handler")
-            while not self.must_pause_work:
-                if not self.current_line:
-                    try:
-                        self.current_line = next(self.gcode_lines)
-                    except self.gcode.error as e:
-                        error_message = str(e)
-                        try:
-                            self.gcode.run_script(self.on_error_gcode.render())
-                        except:
-                            logging.exception("virtual_sdcard on_error")
-                        break
-                    except StopIteration:
-                        self.gcode_provider = None
-                        break
-                # Pause if any other request is pending in the gcode class
-                if gcode_mutex.test():
-                    self.reactor.pause(self.reactor.monotonic() + 0.100)
+                except Exception as e:
+                    logging.exception("Error in work_handler")
+                    self.print_stats.note_error(str(e))
+                    return self.reactor.NEVER
+
+        if self.current_file_complete:
+            # Finished with file
+            self.gcode_provider = None
+            return self.reactor.NEVER
+        return eventtime + 0.25
+
+    def _load_file(self, filename, check_subdirs=True):
+        if filename.startswith('/'):
+            filename = filename[1:]
+        found_file = None
+        # Check for encrypted G-code first
+        try:
+            encrypted_gcode = self.printer.lookup_object('encrypted_gcode')
+            if encrypted_gcode is not None:
+                logging.info(f"Attempting to load as encrypted G-code: {filename}")
+                encrypted_gcode.set_filename(filename)
+                self.current_file = encrypted_gcode
+                self.file_position = 0
+                self.print_stats.set_current_file(filename)
+                return
+        except Exception as e:
+            logging.debug(f"Not an encrypted file: {str(e)}")
+            
+        # If not encrypted, try normal G-code paths
+        for dirname in self.sdcard_dirname:
+            # Find file in sd path
+            if not check_subdirs:
+                paths = [dirname]
+            else:
+                paths = [dirname]
+                for root, dirs, files in os.walk(dirname):
+                    paths.extend([os.path.join(root, d) for d in dirs])
+            for path in paths:
+                fname = os.path.join(path, filename)
+                if not os.path.exists(fname):
                     continue
-                # Dispatch command
-                self.cmd_from_sd = True
-                line = self.current_line
                 try:
-                    self.gcode.run_script(line)
-                except self.gcode.error as e:
-                    error_message = str(e)
-                    try:
-                        self.gcode.run_script(self.on_error_gcode.render())
-                    except:
-                        logging.exception("virtual_sdcard on_error")
+                    self.current_file = open(fname, 'r')
+                    self.file_position = 0
+                    self.print_stats.set_current_file(filename)
+                    found_file = fname
                     break
                 except:
-                    logging.exception("virtual_sdcard dispatch")
-                    break
-                self.cmd_from_sd = False
-                self.current_line = ""
-        self.work_timer = None
-        self.cmd_from_sd = False
-        if error_message is not None:
-            self.print_stats.note_error(error_message)
-            self.gcode.respond_raw(error_message)
-            self.gcode_provider = None
-        elif self.gcode_provider is not None:
-            self.print_stats.note_pause()
+                    logging.exception("virtual_sdcard: Unable to open file")
+                    continue
+            if found_file is not None:
+                break
+        if found_file is None:
+            raise self.gcode.error("Unable to open file")
         else:
-            self.print_stats.note_complete()
-            self.print_stats.state = "standby"  # Ensure state is reset to standby
-            logging.info("Reset printer state to standby after print completion")
-            # Force a state update notification
-            self.gcode.respond_info("Printer state reset to standby")
-            self.reactor.pause(self.reactor.monotonic() + 2.0)  # Add a longer delay
-            # Clear any pending G-code or errors
-            try:
-                self.gcode.run_script_from_command("CLEAR_PAUSE")
-                self.gcode.run_script_from_command("TURN_OFF_HEATERS")
-                self.gcode.run_script_from_command("SDCARD_RESET_FILE")
-                logging.info("Cleared Klipper pause state, turned off heaters, and reset file")
-            except Exception as e:
-                logging.error(f"Failed to clear Klipper pause state or turn off heaters: {str(e)}")
-            # Trigger a Klipper event to notify Moonraker
-            self.printer.send_event("virtual_sdcard:reset_file")
-        return self.reactor.NEVER
+            logging.info("Loaded file: %s", found_file)
+
+    def _handle_status_update(self, eventtime):
+        if self.current_file is None:
+            return False
+        status = self.current_file.get_status(eventtime)
+        if status is None:
+            return False
+        self.file_position = status.get('file_position', self.file_position)
+        # Update print_stats with any provider-specific information
+        if hasattr(self.current_file, '_metadata'):
+            metadata = getattr(self.current_file, '_metadata')
+            if metadata:
+                # Update layer information
+                self.print_stats.current_layer = metadata.get('current_layer', 0)
+                self.print_stats.total_layer = metadata.get('layer_count', 0)
+                
+                # Update filament used
+                self.print_stats.filament_used = metadata.get('filament_used', 0.0)
+                
+                # Update time estimates
+                if self.print_stats.state == 'printing' and self.start_time is not None:
+                    elapsed = eventtime - self.start_time
+                    self.print_stats.print_duration = elapsed
+                    if elapsed > 0 and self.file_size > 0:
+                        progress = float(self.file_position) / float(self.file_size)
+                        if progress > 0:
+                            total_est = elapsed / progress
+                            self.print_stats.total_duration = total_est
+                            logging.debug(f"Updated time estimates - elapsed: {elapsed}, total: {total_est}, progress: {progress}")
+        return True
 
 def load_config(config):
     return VirtualSD(config)
