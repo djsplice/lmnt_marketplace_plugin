@@ -10,6 +10,25 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 - Web API endpoint for slice-and-print operations
 - Compatible with Mainsail and other Klipper web interfaces
 
+
+## Flow
+```
+[Encrypted G-code Upload]
+         ↓
+[Decryption & Metadata Extraction]
+         ↓
+[Print Start → print_stats notified]
+         ↓
+[Layer/Progress Updates in print_stats]
+         ↓
+[notify_status_update WebSocket Event]
+         ↓
+[Clients: Mainsail, Mobileraker, Mooncord]
+         ↓
+[Real-Time UI Updates]
+```
+
+
 ## Components
 
 ### Moonraker Extension (`hedera_slicer.py`)
@@ -90,6 +109,56 @@ Query file metadata:
 ```bash
 curl -X GET "http://localhost:7125/server/files/metadata?filename=hedera_streamed_print.gcode"
 ```
+
+## Decryption and Streaming Flow (HederaSlicer)
+1. Encrypted File is Read
+The encrypted G-code file is read entirely into memory:
+python
+CopyInsert
+with open(encrypted_filepath, "rb") as f:
+    encrypted_gcode = f.read()
+
+2. Decryption (In-Memory)
+The entire file is decrypted in memory using Fernet:
+python
+CopyInsert
+decrypted_gcode = cipher.decrypt(encrypted_gcode).decode()
+At this point, the entire decrypted G-code is held in memory as a string.
+
+3. Chunking for Streaming
+The decrypted G-code is split into lines:
+python
+CopyInsert
+lines = decrypted_gcode.splitlines()
+The code then processes these lines for metadata extraction (e.g., layer count, thumbnails, etc.).
+
+4. Streaming to Klipper
+The lines are sent one by one to Klipper via the STREAM_GCODE_LINE command (see lines 627–629 in your grep results):
+python
+CopyInsert
+await klippy_apis.run_gcode(f'STREAM_GCODE_LINE LINE="{escaped_line}"')
+await asyncio.sleep(0.001)  # Small delay to avoid flooding
+This is a true streaming process: the file is not saved as a decrypted file on disk; instead, it is streamed line-by-line from memory.
+
+5. No Decrypted File on Disk
+The decrypted G-code is never written to the filesystem as a whole file. It exists only in memory during streaming. Only metadata or thumbnails might be temporarily written for inspection, but not the main G-code.
+
+6. Integration with virtual_sdcard
+Klipper receives each line as if it were reading from a file, but in reality, it’s being fed lines over the API.
+This allows the print to proceed as if it was reading from a virtual SD card, but with the added security and flexibility of on-the-fly decryption and streaming.
+
+Summary Table
+| Step | File on Disk? | In Memory? | Streaming? | Notes | 
+|-----------------|--------------|------------|------------|----------------------------------------| 
+| Encrypted Read | Yes | Yes | No | Reads encrypted file from disk | 
+| Decrypt | No | Yes | No | Decrypts entire file in memory | 
+| Chunk/Stream | No | Yes | Yes | Streams lines to Klipper one at a time | 
+| Decrypted File | No | Yes | Yes | Never saved as a decrypted file |
+
+Conclusion
+You are correct: The file is never fully decrypted and saved to disk. The decrypted data exists only in memory and is streamed to Klipper line-by-line.
+This approach is secure (no decrypted file left on disk) and efficient, but does require enough RAM to hold the largest decrypted G-code you expect to process.
+If you want to explore true chunked decryption (decrypting and streaming in blocks, not the whole file at once), that would require a different encryption mode (not Fernet) and more complex logic.
 
 ## License
 
