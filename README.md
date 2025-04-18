@@ -5,11 +5,13 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 ## Features
 
 - Secure G-code file handling with Fernet encryption
+- **Automatic detection and support for both encrypted and plaintext G-code files**
 - Seamless integration with Klipper's native print process
 - Real-time print status and statistics tracking
 - Web API endpoint for slice-and-print operations
 - Compatible with Mainsail and other Klipper web interfaces
 
+**Note:** The system will automatically attempt to open G-code files as encrypted first; if that fails, it falls back to standard plaintext mode. This ensures a seamless experience regardless of file type.
 
 ## Flow
 ```
@@ -28,7 +30,6 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 [Real-Time UI Updates]
 ```
 
-
 ## Components
 
 ### Moonraker Extension (`hedera_slicer.py`)
@@ -38,7 +39,7 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 - Handles file cleanup after print completion
 
 ### Klipper Modifications
-- Enhanced `virtual_sdcard.py` for encrypted file operations
+- Enhanced `virtual_sdcard.py` for encrypted and plaintext G-code file operations with automatic detection and fallback
 - Modified `print_stats.py` for accurate print statistics
 - Secure G-code streaming implementation
 
@@ -82,8 +83,9 @@ sudo systemctl reload nginx
 
 ## Usage
 
-1. Start the `osx-local-app.py` slicer application
-2. Send a slice request with your configuration:
+- Upload either encrypted or plaintext G-code files; the system will handle both transparently.
+- Start the `osx-local-app.py` slicer application
+- Send a slice request with your configuration:
 ```bash
 curl -X POST \
   -F "data={\"wallet_address\":\"YOUR_WALLET\",\"token_id\":\"ID\",\"contract_address\":\"CONTRACT\",\"encryption_key\":\"KEY\",\"uri\":\"hedera://0.0.1047\",\"print\":\"true\"}" \
@@ -92,6 +94,8 @@ curl -X POST \
   -F "filament=@filament/material.json" \
   http://localhost:5000/slice
 ```
+
+**Note:** The system now seamlessly switches between encrypted and plaintext G-code files, improving error handling and user experience.
 
 ## Debugging
 
