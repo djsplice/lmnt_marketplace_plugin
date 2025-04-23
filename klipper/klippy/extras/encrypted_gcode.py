@@ -95,8 +95,14 @@ class EncryptedGCodeProvider:
             if elapsed > 0:
                 total_est = elapsed / progress
                 remaining = total_est - elapsed
+                
+                # Only update metadata, don't call _update_print_stats here
+                # This prevents excessive status updates
                 self._metadata['print_duration'] = total_est
-                self._update_print_stats()  # Update with new duration estimate
+                
+                # Update the info dictionary directly without triggering a full update
+                if hasattr(self.print_stats, 'info'):
+                    self.print_stats.info['estimated_time'] = total_est
         
         return status
 
@@ -340,23 +346,34 @@ class EncryptedGCodeProvider:
                 if elapsed > 0:
                     total_est = elapsed / progress
                     self._metadata['print_duration'] = total_est
-                    
-                    # Update both print_duration and total_duration
-                    gcode.run_script_from_command(
-                        f"SET_PRINT_STATS_INFO"
-                        f" PRINT_TIME={elapsed}"  # Current elapsed time
-                        f" TOTAL_TIME={total_est}"  # Estimated total time
-                    )
+                    print_time = elapsed
+                    total_time = total_est
+                else:
+                    print_time = 0
+                    total_time = 0
+            else:
+                print_time = 0
+                total_time = 0
 
-            # Update all other stats
+            # Update all stats with a single command to reduce overhead
             cmd = (
                 f"SET_PRINT_STATS_INFO"
                 f" TOTAL_LAYER={self._metadata.get('layer_count', 0)}"
                 f" CURRENT_LAYER={self._metadata.get('current_layer', 0)}"
-                f" FILAMENT_USED={self._metadata.get('filament_used', 0.0)}"
-                f" TOTAL_SIZE={self.file_size}"
-                f" FILE_POSITION={self.file_position}"
             )
+            
+            # For filament, use the current value for FILAMENT_USED and total for FILAMENT_TOTAL
+            filament_used = self._metadata.get('filament_used', 0.0)
+            cmd += f" FILAMENT_USED={filament_used} FILAMENT_TOTAL={filament_used}"
+            
+            cmd += f" TOTAL_SIZE={self.file_size} FILE_POSITION={self.file_position}"
+            
+            # Only add time parameters if they're valid
+            if print_time > 0:
+                cmd += f" PRINT_TIME={print_time}"
+            if total_time > 0:
+                cmd += f" TOTAL_TIME={total_time}"
+                
             gcode.run_script_from_command(cmd)
             
             # Set print_stats attributes directly for immediate update
@@ -364,8 +381,20 @@ class EncryptedGCodeProvider:
             self.print_stats.current_layer = self._metadata.get('current_layer', 0)
             self.print_stats.file_position = self.file_position
             self.print_stats.file_size = self.file_size
+            self.print_stats.filament_used = filament_used
             
-            # Force an immediate update
+            # Update info dictionary for Mainsail compatibility
+            if hasattr(self.print_stats, 'info'):
+                self.print_stats.info['total_layer'] = self._metadata.get('layer_count', 0)
+                self.print_stats.info['total_layers'] = self._metadata.get('layer_count', 0)
+                self.print_stats.info['current_layer'] = self._metadata.get('current_layer', 0)
+                self.print_stats.info['current_layers'] = self._metadata.get('current_layer', 0)
+                self.print_stats.info['filament_used'] = filament_used
+                self.print_stats.info['filament_total'] = filament_used
+                if total_time > 0:
+                    self.print_stats.info['estimated_time'] = total_time
+            
+            # Force an immediate update but only log at info level for layer changes
             self.print_stats._update_stats(self.printer.get_reactor().monotonic())
             logging.info(f"Updated print_stats with: {self._metadata}, file_position={self.file_position}")
         except Exception as e:
@@ -436,6 +465,10 @@ class EncryptedGCodeProvider:
                             # Also update the info field for Mainsail compatibility
                             if hasattr(self.print_stats, 'info'):
                                 self.print_stats.info['current_layer'] = current_layer
+                                self.print_stats.info['current_layers'] = current_layer
+                            
+                            # Update all stats on layer change
+                            self._update_print_stats()
                             
                             # Send the command directly to ensure it takes effect
                             try:
@@ -461,10 +494,12 @@ class EncryptedGCodeProvider:
                         e_value = float(e_match.group(1))
                         if e_value > 0:  # Only count positive extrusion
                             self._metadata['filament_used'] += e_value
-                            # Update print_stats periodically (every 1mm of filament)
-                            if int(self._metadata['filament_used']) > int(self._last_reported_filament):
-                                self._last_reported_filament = self._metadata['filament_used']
-                                self._update_print_stats()  # Update stats on significant filament change
+                            # Only update filament usage in memory, don't send status updates
+                            # Updates will be sent on layer changes instead
+                            if hasattr(self.print_stats, 'info'):
+                                self.print_stats.info['filament_used'] = self._metadata['filament_used']
+                                self.print_stats.info['filament_total'] = self._metadata['filament_used']
+                            self.print_stats.filament_used = self._metadata['filament_used']
                 except Exception as e:
                     logging.warning(f"Failed to track filament usage: {e}")
             
@@ -510,6 +545,9 @@ class EncryptedGCodeProvider:
             # Set streaming state
             self.is_streaming = True
             
+            # Reset filament used to 0 at the start of print
+            self._metadata['filament_used'] = 0.0
+            
             # Inject SET_PRINT_STATS_INFO command at the beginning of the print
             # This is critical for Mainsail to display the layer count correctly
             layer_count = self._metadata.get('layer_count', 0)
@@ -519,13 +557,26 @@ class EncryptedGCodeProvider:
                 # Also update the info field for Mainsail compatibility
                 self.print_stats.info = {
                     'total_layer': layer_count,
-                    'current_layer': 0
+                    'total_layers': layer_count,
+                    'current_layer': 0,
+                    'current_layers': 0,
+                    'filament_used': 0.0,
+                    'filament_total': self._metadata.get('filament_total', 0.0)
                 }
                 logging.info(f"Injected layer info at print start: 0/{layer_count}")
                 
                 # Send the command directly to ensure it takes effect
                 gcode = self.printer.lookup_object('gcode')
-                gcode.run_script_from_command(f"SET_PRINT_STATS_INFO TOTAL_LAYER={layer_count} CURRENT_LAYER=0")
+                cmd = (
+                    f"SET_PRINT_STATS_INFO"
+                    f" TOTAL_LAYER={layer_count}"
+                    f" CURRENT_LAYER=0"
+                    f" FILAMENT_USED=0.0"
+                )
+                if 'filament_total' in self._metadata and self._metadata['filament_total'] > 0:
+                    cmd += f" FILAMENT_TOTAL={self._metadata['filament_total']}"
+                
+                gcode.run_script_from_command(cmd)
             
             # Log the start of the print
             logging.info(f"Starting encrypted print: {filename}, size: {self.file_size} bytes")

@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.2] - 2025-04-22
+### Improved
+- Eliminated duplicate layer updates between Moonraker and Klipper for more reliable layer tracking
+- Established Klipper as the single source of truth for layer information
+- Reduced race conditions in print statistics tracking
+- Maintained LCD display functionality while simplifying the update flow
+
+### Fixed
+- Resolved potential conflicts in layer tracking between Moonraker and Klipper components
+
 ## [1.0.1] - 2025-04-18
 ### Improved
 - Enhanced `virtual_sdcard.py` to transparently support both encrypted and plaintext G-code files.

@@ -10,6 +10,7 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 - Real-time print status and statistics tracking
 - Web API endpoint for slice-and-print operations
 - Compatible with Mainsail and other Klipper web interfaces
+- **Clear separation of responsibilities between Klipper and Moonraker components**
 
 **Note:** The system will automatically attempt to open G-code files as encrypted first; if that fails, it falls back to standard plaintext mode. This ensures a seamless experience regardless of file type.
 
@@ -21,7 +22,7 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
          ↓
 [Print Start → print_stats notified]
          ↓
-[Layer/Progress Updates in print_stats]
+[Layer/Progress Updates in print_stats (Klipper)]
          ↓
 [notify_status_update WebSocket Event]
          ↓
@@ -37,11 +38,13 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 - Provides `/machine/hedera_slicer/slice_and_print` API endpoint
 - Manages print job scheduling and monitoring
 - Handles file cleanup after print completion
+- Displays layer information on LCD via M117 commands
 
 ### Klipper Modifications
 - Enhanced `virtual_sdcard.py` for encrypted and plaintext G-code file operations with automatic detection and fallback
 - Modified `print_stats.py` for accurate print statistics
 - Secure G-code streaming implementation
+- **Single source of truth for layer tracking and print statistics**
 
 ## Installation
 
