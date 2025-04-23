@@ -203,19 +203,31 @@ class PrintStats:
         self.total_layer = gcmd.get_int('TOTAL_LAYER', self.total_layer)
         # Also update the info field for Mainsail compatibility
         self.info['current_layer'] = self.current_layer
+        self.info['current_layers'] = self.current_layer
         self.info['total_layer'] = self.total_layer
+        self.info['total_layers'] = self.total_layer
         total_time = gcmd.get_float('TOTAL_TIME', None)
         if total_time is not None:
             self.total_duration = total_time
+            self.info['estimated_time'] = total_time
             logging.debug(f"Updated total_duration to {total_time}")
         print_time = gcmd.get_float('PRINT_TIME', None)
         if print_time is not None:
             self.print_duration = print_time
             logging.debug(f"Updated print_duration to {print_time}")
+        # Accept either FILAMENT_USED or FILAMENT_TOTAL for compatibility
         filament_used = gcmd.get_float('FILAMENT_USED', None)
         if filament_used is not None:
             self.filament_used = filament_used
+            self.info['filament_used'] = filament_used
+            self.info['filament_total'] = filament_used
             logging.debug(f"Updated filament_used to {filament_used}")
+        filament_total = gcmd.get_float('FILAMENT_TOTAL', None)
+        if filament_total is not None and filament_used is None:
+            self.filament_used = filament_total
+            self.info['filament_used'] = filament_total
+            self.info['filament_total'] = filament_total
+            logging.debug(f"Updated filament_used to {filament_total} (from FILAMENT_TOTAL)")
         file_size = gcmd.get_int('TOTAL_SIZE', None)
         if file_size is not None:
             self.file_size = file_size

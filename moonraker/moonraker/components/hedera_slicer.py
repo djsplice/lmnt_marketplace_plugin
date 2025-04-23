@@ -722,7 +722,37 @@ class HederaSlicer:
             # Get Klipper API instance
             klippy_apis = self.server.lookup_component('klippy_apis')
             
-            # Log the update
+            # First, check if Klipper is already tracking layers
+            try:
+                result = await klippy_apis.query_objects({"print_stats": None})
+                print_stats = result.get('print_stats', {})
+                klipper_current_layer = print_stats.get('current_layer') or print_stats.get('info', {}).get('current_layer')
+                klipper_total_layer = print_stats.get('total_layer') or print_stats.get('info', {}).get('total_layer')
+                
+                # If Klipper is already tracking layers and has a more recent layer count, defer to it
+                if klipper_current_layer is not None and klipper_total_layer is not None:
+                    if klipper_current_layer >= current_layer:
+                        logging.info(f"Deferring to Klipper's layer tracking: {klipper_current_layer}/{klipper_total_layer} (ours: {current_layer}/{layer_count})")
+                        # Update our local tracking to match Klipper
+                        current_layer = klipper_current_layer
+                        layer_count = klipper_total_layer
+                        
+                        # Skip sending any commands - Klipper is handling everything
+                        
+                        # Force a status update to refresh clients
+                        await klippy_apis.query_objects({"print_stats": None})
+                        logging.info("Forced status update query to refresh all clients")
+                        
+                        # Update our stored metadata
+                        if filename in self.file_metadata:
+                            self.file_metadata[filename]['current_layer'] = current_layer
+                            logging.info(f"Updated runtime metadata to match Klipper: current_layer={current_layer}, layer_count={layer_count}")
+                        
+                        return True
+            except Exception as e:
+                logging.error(f"Error checking Klipper layer tracking: {str(e)}")
+            
+            # If we get here, either Klipper isn't tracking layers or our layer count is more recent
             logging.info(f"Updating layer information: {current_layer}/{layer_count}")
             
             # Step 1: Update print_stats directly via gcode command
@@ -778,15 +808,30 @@ class HederaSlicer:
                     "encrypted_gcode": None
                 })
                 
-                printer_state = printer_info.get("print_stats", {}).get("state", "unknown")
+                printer_state = printer_info.get("print_stats", {}).get("state", "")
                 if printer_state in ["complete", "error", "cancelled"]:
                     logging.info(f"Print job finished with state: {printer_state}")
                     break
-                    
-                # Get current layer information from encrypted_gcode object
+                
+                # First try to get layer information from print_stats (Klipper's tracking)
+                print_stats = printer_info.get("print_stats", {})
+                print_stats_info = print_stats.get("info", {})
+                
+                # Get current layer information, prioritizing print_stats over encrypted_gcode
+                current_layer = (
+                    print_stats.get("current_layer") or 
+                    print_stats_info.get("current_layer") or 
+                    printer_info.get("encrypted_gcode", {}).get("current_layer", 0)
+                )
+                
+                layer_count = (
+                    print_stats.get("total_layer") or 
+                    print_stats_info.get("total_layer") or 
+                    printer_info.get("encrypted_gcode", {}).get("layer_count", 0)
+                )
+                
+                # Get other metadata from encrypted_gcode
                 encrypted_gcode = printer_info.get("encrypted_gcode", {})
-                current_layer = encrypted_gcode.get("current_layer", 0)
-                layer_count = encrypted_gcode.get("layer_count", 0)
                 progress = encrypted_gcode.get("progress", 0)
                 print_duration = encrypted_gcode.get("print_duration", 0)
                 filament_used = encrypted_gcode.get("filament_used", 0)
@@ -809,26 +854,33 @@ class HederaSlicer:
                 # Check progress to detect if print is still active
                 current_progress = printer_info.get("virtual_sdcard", {}).get("progress", 0)
                 if current_progress != last_progress:
-                    # Progress changed, reset timeout
-                    start_time = asyncio.get_event_loop().time()
                     last_progress = current_progress
                     
+                    # If progress has changed significantly, update metadata
+                    if abs(current_progress - progress) > 0.05:  # 5% change
+                        await self.update_runtime_metadata(
+                            encrypted_filepath, 
+                            current_layer, 
+                            layer_count, 
+                            current_progress, 
+                            print_duration, 
+                            filament_used
+                        )
+                
+                # Check if we've been monitoring for too long
                 if elapsed_time > max_monitor_time:
-                    logging.warning(f"Print state monitoring timed out after {max_monitor_time} seconds")
+                    logging.warning(f"Monitoring timeout after {max_monitor_time} seconds")
                     break
                     
-                await asyncio.sleep(1.0)  # Check more frequently to catch layer changes
+                # Sleep to avoid excessive polling
+                await asyncio.sleep(6.0)
                 
         except Exception as e:
-            logging.error(f"Error monitoring print state: {str(e)}\n{traceback.format_exc()}")
-        finally:
-            # Always try to clean up the file
-            try:
-                if os.path.exists(encrypted_filepath):
-                    os.remove(encrypted_filepath)
-                    logging.info(f"Cleaned up encrypted file: {encrypted_filepath}")
-            except Exception as e:
-                logging.error(f"Failed to clean up encrypted file: {str(e)}")
+            logging.error(f"Error monitoring print state: {str(e)}")
+            return False
+            
+        logging.info(f"Finished monitoring print state for: {encrypted_filepath}")
+        return True
 
     def save_encrypted_gcode(self, encrypted_filepath, encrypted_gcode_data):
         """Save encrypted gcode to a file."""
@@ -884,7 +936,7 @@ class HederaSlicer:
             # Save the encrypted gcode
             self.save_encrypted_gcode(gcode_path, encrypted_gcode)
             
-            # Extract metadata from the encrypted file - ONLY ONCE
+            # Extract metadata from the encrypted file
             metadata = self.extract_metadata(gcode_path)
             
             # Create metadata file
