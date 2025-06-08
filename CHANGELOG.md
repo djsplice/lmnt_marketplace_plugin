@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.3] - 2025-06-08
+### Added
+- LMNT Marketplace integration for secure printer token management
+- Dedicated `/api/refresh-printer-token` endpoint for secure printer token refresh
+- Printer-specific encryption key (PSEK) handling for secure G-code decryption
+- Standalone test script (`test_marketplace_integration.py`) for testing marketplace integration
+- Integration with Custodial Wallet Service (CWS) for key management
+
+### Fixed
+- Resolved indentation and syntax errors in the marketplace integration test script
+- Improved error handling in HTTP requests with timeouts to prevent hanging
+- Enhanced token refresh logic with better error handling
+
+### Improved
+- Added detailed logging for marketplace API interactions
+- Implemented automatic token refresh mechanism with 30-day expiration
+- Added JWT middleware for printer token validation
+- Implemented command-line argument support for flexible testing scenarios
+- Added simulation of GCode encryption/decryption using decrypted PSEKs
+
 ## [1.0.2] - 2025-04-22
 ### Improved
 - Eliminated duplicate layer updates between Moonraker and Klipper for more reliable layer tracking

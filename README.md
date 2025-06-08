@@ -1,6 +1,6 @@
 # Encrypted G-code Plugin for Klipper/Moonraker
 
-A plugin system that enables secure handling of encrypted G-code files for Klipper-based 3D printers, integrating with Moonraker for web-based control.
+A plugin system that enables secure handling of encrypted G-code files for Klipper-based 3D printers, integrating with Moonraker for web-based control and the LMNT Marketplace for secure printer token management.
 
 ## Features
 
@@ -11,6 +11,8 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 - Web API endpoint for slice-and-print operations
 - Compatible with Mainsail and other Klipper web interfaces
 - **Clear separation of responsibilities between Klipper and Moonraker components**
+- **LMNT Marketplace integration with secure printer token management**
+- **Printer-specific encryption key (PSEK) handling for secure G-code decryption**
 
 **Note:** The system will automatically attempt to open G-code files as encrypted first; if that fails, it falls back to standard plaintext mode. This ensures a seamless experience regardless of file type.
 
@@ -39,6 +41,12 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 - Manages print job scheduling and monitoring
 - Handles file cleanup after print completion
 - Displays layer information on LCD via M117 commands
+
+### LMNT Marketplace Plugin (`lmnt_marketplace_plugin.py`)
+- Manages printer registration with the LMNT Marketplace
+- Handles secure printer JWT token storage and automatic refresh via dedicated `/api/refresh-printer-token` endpoint
+- Manages printer-specific encryption keys (PSEKs) for secure G-code decryption
+- Provides integration with the Custodial Wallet Service (CWS) for key management
 
 ### Klipper Modifications
 - Enhanced `virtual_sdcard.py` for encrypted and plaintext G-code file operations with automatic detection and fallback
@@ -111,6 +119,54 @@ View Hedera Slicer logs:
 ```bash
 cat ~/printer_data/logs/moonraker.log | grep "hedera_slicer"
 ```
+
+View LMNT Marketplace Plugin logs:
+```bash
+cat ~/printer_data/logs/moonraker.log | grep "lmnt_marketplace"
+```
+
+## LMNT Marketplace API Endpoints
+
+### Printer Token Refresh
+The system uses a dedicated endpoint for refreshing printer tokens:
+
+```
+POST /api/refresh-printer-token
+```
+
+This endpoint:
+- Validates the current printer token via middleware
+- Issues a new token with extended expiration (30 days)
+- Returns the new token and expiry date
+- Requires printer-specific JWT authentication
+- Prevents non-printer tokens from being refreshed
+
+The printer plugin automatically handles token refresh when tokens approach expiration.
+
+## Testing
+
+A standalone test script (`test_marketplace_integration.py`) is available for testing the LMNT Marketplace integration:
+
+```bash
+# Run the full test with login credentials
+python test_marketplace_integration.py --email your@email.com --password yourpassword
+
+# Test only token refresh
+python test_marketplace_integration.py --refresh-only
+
+# Test only decryption
+python test_marketplace_integration.py --decrypt-only
+
+# Enable debug logging
+python test_marketplace_integration.py --debug
+```
+
+This script tests:
+- User login to the Custodial Wallet Service (CWS)
+- Printer registration with the Marketplace API
+- Printer token refresh flow
+- PSEK decryption via CWS
+- Simulated G-code encryption/decryption
 
 Query file metadata:
 ```bash
