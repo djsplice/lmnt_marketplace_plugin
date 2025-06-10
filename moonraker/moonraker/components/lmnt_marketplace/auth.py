@@ -227,6 +227,7 @@ class AuthManager:
             
             # Authenticate with CWS
             login_url = f"{self.integration.cws_url}/api/login"
+            logging.info(f"Attempting login with URL: {login_url}")
             
             async with self.http_client.post(
                 login_url, 

@@ -136,6 +136,10 @@ class LmntMarketplacePlugin:
             if not username or not password:
                 raise self.server.error("Missing username or password", 400)
             
+            # Log the request details
+            logging.info(f"Login request for user: {username}")
+            logging.info(f"Using CWS URL: {self.integration.cws_url}")
+            
             # Delegate to the auth manager
             result = await self.integration.auth_manager.login_user(username, password)
             return result
