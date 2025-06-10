@@ -147,7 +147,7 @@ class JobManager:
             return
         
         # Get the API endpoint URL
-        api_url = f"{self.integration.api_url}/api/poll-print-queue"
+        api_url = f"{self.integration.marketplace_url}/api/poll-print-queue"
         logging.info(f"LMNT JOB POLLING: Polling for jobs at: {api_url} for printer ID: {printer_id}")
         
         # Get the printer token for authentication
