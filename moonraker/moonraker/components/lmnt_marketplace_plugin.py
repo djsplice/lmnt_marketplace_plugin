@@ -29,22 +29,14 @@ class LmntMarketplacePlugin:
         logging.info("Initializing LMNT Marketplace Plugin (modular version)")
         
         try:
-            # Get the directory of this file
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            
-            # Add the lmnt_marketplace directory to the Python path
-            marketplace_dir = os.path.join(current_dir, "lmnt_marketplace")
-            if marketplace_dir not in sys.path:
-                sys.path.insert(0, marketplace_dir)
-            
-            # Import the integration class directly
-            # This avoids the circular import issue
-            from lmnt_marketplace.integration import LmntMarketplaceIntegration
+            # Use a relative import to avoid path manipulation
+            # This avoids the circular import issue and module not found errors
+            from .lmnt_marketplace import LmntMarketplaceIntegration
             
             # Initialize the modular integration
             self.integration = LmntMarketplaceIntegration(config, self.server)
             
-            logging.info(f"Successfully imported LmntMarketplaceIntegration from {marketplace_dir}")
+            logging.info("Successfully imported LmntMarketplaceIntegration using relative import")
         except Exception as e:
             logging.error(f"Error importing LmntMarketplaceIntegration: {str(e)}")
             logging.error(f"Traceback: {traceback.format_exc()}")
