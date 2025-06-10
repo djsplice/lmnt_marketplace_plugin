@@ -180,7 +180,7 @@ class AuthManager:
             logging.error("Cannot refresh printer token: No token available")
             return False
         
-        refresh_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/refresh-printer-token"
+        refresh_url = f"{self.integration.marketplace_url}/api/refresh-printer-token"
         
         try:
             headers = {"Authorization": f"Bearer {self.printer_token}"}
@@ -226,7 +226,7 @@ class AuthManager:
                 raise self.integration.server.error("Missing username or password", 400)
             
             # Authenticate with CWS
-            login_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/login"
+            login_url = f"{self.integration.cws_url}/api/login"
             
             async with self.http_client.post(
                 login_url, 
@@ -293,7 +293,7 @@ class AuthManager:
             self.user_token = user_token
             
             # Register printer with marketplace
-            register_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/register-printer"
+            register_url = f"{self.integration.marketplace_url}/api/register-printer"
             
             headers = {"Authorization": f"Bearer {self.user_token}"}
             
