@@ -298,7 +298,9 @@ class AuthManager:
             
             # Register printer with marketplace using the correct endpoint
             register_url = f"{self.integration.marketplace_url}/api/register-printer"
+            logging.info(f"Registering printer with URL: {register_url}")
             
+            # Use standard Authorization header for the marketplace API
             headers = {"Authorization": f"Bearer {self.user_token}"}
             
             # Build payload with all required fields
@@ -309,37 +311,35 @@ class AuthManager:
             }
             logging.info(f"Registering printer with payload: {payload}")
             
-            async with self.http_client.post(
-                register_url,
-                headers=headers,
-                json=payload
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"Printer registration failed: {error_text}")
-                    raise self.integration.server.error(f"Registration failed: {error_text}", response.status)
-                
-                data = await response.json()
-                printer_token = data.get('token')
-                encrypted_psek = data.get('kek_id')  # Actually contains encrypted PSEK
-                
-                if not printer_token:
-                    raise self.integration.server.error("Registration response missing token", 500)
-                
-                # Calculate expiry (30 days from now)
-                expiry = datetime.now() + timedelta(days=30)
-                
-                # Save the printer token
-                self.save_printer_token(printer_token, expiry)
-                
-                # Save the encrypted PSEK if provided
-                if encrypted_psek:
-                    self.integration.crypto_manager._save_encrypted_psek(encrypted_psek)
-                
-                # Clear user token after registration
-                self.user_token = None
-                
-                return {"status": "success", "printer_id": self.printer_id}
+            logging.info(f"Sending registration request with headers: {headers}")
+            try:
+                async with self.http_client.post(
+                    register_url,
+                    headers=headers,
+                    json=payload
+                ) as response:
+                    response_text = await response.text()
+                    logging.info(f"Registration response status: {response.status}")
+                    logging.info(f"Registration response body: {response_text}")
+                    
+                    if response.status != 200 and response.status != 201:
+                        logging.error(f"Printer registration failed: {response_text}")
+                        raise self.integration.server.error(f"Registration failed: {response_text}", response.status)
+                    
+                    # Try to parse as JSON if possible
+                    try:
+                        data = json.loads(response_text)
+                        printer_token = data.get('token')
+                        if printer_token:
+                            self._save_printer_token(printer_token)
+                            logging.info("Printer token saved successfully")
+                        return data
+                    except json.JSONDecodeError:
+                        logging.warning("Response was not valid JSON, returning as text")
+                        return {"success": True, "message": response_text}
+            except Exception as e:
+                logging.error(f"Exception during registration request: {str(e)}")
+                raise self.integration.server.error(f"Registration request error: {str(e)}", 500)
         except aiohttp.ClientError as e:
             logging.error(f"HTTP error during printer registration: {str(e)}")
             raise self.integration.server.error(f"Connection error: {str(e)}", 500)

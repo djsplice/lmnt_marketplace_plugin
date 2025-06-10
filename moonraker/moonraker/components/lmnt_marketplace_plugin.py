@@ -177,12 +177,19 @@ class LmntMarketplacePlugin:
             manufacturer = args.get('manufacturer')
             model = args.get('model')
             
-            # Check for Authorization header if user_token is not in body
+            # Check for token in body or custom header
             if not user_token:
-                auth_header = web_request.headers.get('Authorization')
-                if auth_header and auth_header.startswith('Bearer '):
-                    user_token = auth_header[7:]  # Remove 'Bearer ' prefix
-                    logging.info("Using token from Authorization header")
+                # Try custom header first to avoid Moonraker's JWT validation
+                lmnt_auth = web_request.headers.get('X-LMNT-Authorization')
+                if lmnt_auth and lmnt_auth.startswith('Bearer '):
+                    user_token = lmnt_auth[7:]  # Remove 'Bearer ' prefix
+                    logging.info("Using token from X-LMNT-Authorization header")
+                else:
+                    # Fallback to standard Authorization header
+                    auth_header = web_request.headers.get('Authorization')
+                    if auth_header and auth_header.startswith('Bearer '):
+                        user_token = auth_header[7:]  # Remove 'Bearer ' prefix
+                        logging.info("Using token from Authorization header")
             
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
