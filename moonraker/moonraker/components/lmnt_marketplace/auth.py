@@ -188,12 +188,15 @@ class AuthManager:
             # Decode JWT without verification to extract printer_id
             # This is safe because we're not using the token for authentication here
             payload = jwt.decode(self.printer_token, options={"verify_signature": False})
-            printer_id = payload.get('printer_id')
+            
+            # Check for both camelCase and snake_case variations of printer ID
+            printer_id = payload.get('printer_id') or payload.get('printerId')
             
             if printer_id:
                 logging.info(f"LMNT AUTH: Successfully extracted printer ID from token: {printer_id}")
             else:
-                logging.error("LMNT AUTH: Token does not contain a printer_id claim")
+                logging.error("LMNT AUTH: Token does not contain a printer_id or printerId claim")
+                logging.error(f"LMNT AUTH: Available claims in token: {list(payload.keys())}")
                 if self.integration.debug_mode:
                     logging.debug(f"LMNT AUTH: Token payload: {payload}")
             
