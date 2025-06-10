@@ -138,25 +138,27 @@ class JobManager:
     
     async def _poll_for_jobs(self):
         """Poll the marketplace for new print jobs"""
+        logging.info("LMNT JOB POLLING: _poll_for_jobs method called")
+        
         # Validate prerequisites
         if not self.integration.auth_manager.printer_token:
-            logging.error("Cannot poll for jobs: No printer token available")
+            logging.error("LMNT JOB POLLING: Cannot poll for jobs: No printer token available")
             return
         
         if not self.integration.auth_manager.printer_id:
-            logging.error("Cannot poll for jobs: No printer ID available")
+            logging.error("LMNT JOB POLLING: Cannot poll for jobs: No printer ID available")
             return
         
         # Check if printer is busy
         if self.current_print_job:
-            logging.debug("Skipping job poll: Printer is busy with current job")
+            logging.debug("LMNT JOB POLLING: Skipping job poll: Printer is busy with current job")
             return
         
         # Construct API URL
         printer_id = self.integration.auth_manager.printer_id
         jobs_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/printer-jobs"
         
-        logging.info(f"Polling for jobs at: {jobs_url} for printer ID: {printer_id}")
+        logging.info(f"LMNT JOB POLLING: Polling for jobs at: {jobs_url} for printer ID: {printer_id}")
         
         try:
             # Prepare headers with authentication token
@@ -164,42 +166,49 @@ class JobManager:
             redacted_token = token[:5] + "..." if token and len(token) > 8 else "[NONE]"
             headers = {"Authorization": f"Bearer {token}"}
             
-            logging.debug(f"Sending job poll request with token: {redacted_token}")
+            logging.info(f"LMNT JOB POLLING: Sending job poll request with token: {redacted_token}")
             
             # Make API request
             start_time = time.time()
-            async with self.http_client.get(jobs_url, headers=headers) as response:
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                logging.debug(f"Job poll response received in {elapsed_ms}ms with status: {response.status}")
-                
-                if response.status == 200:
-                    data = await response.json()
-                    jobs = data.get('jobs', [])
+            logging.info(f"LMNT JOB POLLING: Making GET request to {jobs_url}")
+            
+            try:
+                async with self.http_client.get(jobs_url, headers=headers, timeout=10) as response:
+                    elapsed_ms = int((time.time() - start_time) * 1000)
+                    logging.info(f"LMNT JOB POLLING: Response received in {elapsed_ms}ms with status: {response.status}")
                     
-                    if jobs:
-                        logging.info(f"Found {len(jobs)} pending jobs")
-                        await self._process_pending_jobs(jobs)
+                    if response.status == 200:
+                        data = await response.json()
+                        jobs = data.get('jobs', [])
+                        
+                        if jobs:
+                            logging.info(f"LMNT JOB POLLING: Found {len(jobs)} pending jobs")
+                            await self._process_pending_jobs(jobs)
+                        else:
+                            logging.info("LMNT JOB POLLING: No pending jobs found")
+                    elif response.status == 401:
+                        error_text = await response.text()
+                        logging.error(f"LMNT JOB POLLING: Authentication failed during job polling: {error_text}")
+                        logging.info("LMNT JOB POLLING: Will attempt to refresh printer token before next poll")
+                        await self.integration.auth_manager.refresh_printer_token()
                     else:
-                        logging.debug("No pending jobs found")
-                elif response.status == 401:
-                    error_text = await response.text()
-                    logging.error(f"Authentication failed during job polling: {error_text}")
-                    logging.info("Will attempt to refresh printer token before next poll")
-                    await self.integration.auth_manager.refresh_printer_token()
-                else:
-                    error_text = await response.text()
-                    logging.error(f"Job polling failed with status {response.status}: {error_text}")
+                        error_text = await response.text()
+                        logging.error(f"LMNT JOB POLLING: Job polling failed with status {response.status}: {error_text}")
+            except asyncio.TimeoutError:
+                logging.error(f"LMNT JOB POLLING: Request to {jobs_url} timed out after 10 seconds")
+            except aiohttp.ClientConnectorError as e:
+                logging.error(f"LMNT JOB POLLING: Connection error to {jobs_url}: {str(e)}")
+                logging.error(f"LMNT JOB POLLING: Check if the API server is running and accessible from the printer")
+            except aiohttp.ClientError as e:
+                logging.error(f"LMNT JOB POLLING: HTTP client error: {str(e)}")
         except aiohttp.ClientConnectorError as e:
-            logging.error(f"Connection error while polling for jobs: {str(e)}")
+            logging.error(f"LMNT JOB POLLING: Connection error while polling for jobs: {str(e)}")
         except aiohttp.ClientError as e:
-            logging.error(f"HTTP client error while polling for jobs: {str(e)}")
-        except asyncio.TimeoutError:
-            logging.error("Timeout while polling for jobs")
+            logging.error(f"LMNT JOB POLLING: HTTP client error while polling for jobs: {str(e)}")
         except Exception as e:
-            logging.error(f"Unexpected error polling for jobs: {str(e)}")
+            logging.error(f"LMNT JOB POLLING: Unexpected error while polling for jobs: {str(e)}")
             import traceback
-            logging.debug(f"Job polling exception traceback: {traceback.format_exc()}")
-
+            logging.error(f"LMNT JOB POLLING: {traceback.format_exc()}")
     
     async def _process_pending_jobs(self, jobs):
         """Process pending print jobs from the marketplace"""
