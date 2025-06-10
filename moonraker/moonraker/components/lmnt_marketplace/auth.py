@@ -189,15 +189,18 @@ class AuthManager:
                 if response.status == 200:
                     data = await response.json()
                     logging.info(f"Token refresh response: {data}")
-                    new_token = data.get('printer_token')  # Changed from 'token' to 'printer_token'
+                    # Try both field names - some APIs use 'token', others use 'printer_token'
+                    new_token = data.get('printer_token') or data.get('token')
                     
                     if new_token:
                         # Get expiry from response or calculate it
-                        token_expires = data.get('token_expires')
+                        # Try both field names - some APIs use 'token_expires', others use 'expiry'
+                        token_expires = data.get('token_expires') or data.get('expiry')
                         expiry = None
                         if token_expires:
                             try:
                                 expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
+                                logging.info(f"Using expiry date from response: {expiry}")
                             except ValueError:
                                 # Calculate expiry (30 days from now) if parsing fails
                                 expiry = datetime.now() + timedelta(days=30)
@@ -205,13 +208,14 @@ class AuthManager:
                         else:
                             # Calculate expiry (30 days from now) if not provided
                             expiry = datetime.now() + timedelta(days=30)
+                            logging.info("No expiry in response, using default 30 days")
                         
                         # Save the new token
                         self.save_printer_token(new_token, expiry)
                         logging.info("Printer token refreshed successfully")
                         return True
                     else:
-                        logging.error("Token refresh response missing printer_token field")
+                        logging.error("Token refresh response missing token or printer_token field")
                 else:
                     error_text = await response.text()
                     logging.error(f"Token refresh failed with status {response.status}: {error_text}")
