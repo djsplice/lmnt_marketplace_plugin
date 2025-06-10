@@ -38,6 +38,20 @@ class LmntMarketplaceIntegration:
         self.klippy_apis = None
         self.api_version = "1.0.0"
         
+        # Set up paths for tokens and data storage
+        data_path = self.server.get_app_args()['data_path']
+        self.tokens_path = os.path.join(data_path, "lmnt_marketplace", "tokens")
+        
+        # Create directories if they don't exist
+        os.makedirs(self.tokens_path, exist_ok=True)
+        
+        # API endpoints
+        self.marketplace_url = "https://api.lmnt.market"
+        self.cws_url = "https://cws.lmnt.market"
+        
+        # Get event loop for scheduling tasks
+        self.eventloop = self.server.get_event_loop()
+        
         # Initialize managers
         self.auth_manager = auth.AuthManager(self)
         self.crypto_manager = crypto.CryptoManager(self)
