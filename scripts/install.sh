@@ -36,7 +36,12 @@ mkdir -p "${PLUGIN_DIR}/component/lmnt_marketplace"
 echo "Copying plugin files..."
 cp "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" "${PLUGIN_DIR}/component/"
 cp "${REPO_DIR}/moonraker/moonraker/components/hedera_slicer.py" "${PLUGIN_DIR}/component/"
-cp -r "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace/"* "${PLUGIN_DIR}/component/lmnt_marketplace/"
+
+# Create lmnt_marketplace directory if it doesn't exist
+mkdir -p "${PLUGIN_DIR}/component/lmnt_marketplace"
+
+# Copy all files from lmnt_marketplace directory
+cp -r "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace/"* "${PLUGIN_DIR}/component/lmnt_marketplace/" 2>/dev/null || true
 
 # Create symlinks
 echo "Creating symlinks in Moonraker components directory..."

@@ -6,8 +6,8 @@ import logging
 import asyncio
 from moonraker.common import RequestType
 
-# Import the modular integration
-from .lmnt_marketplace import LmntMarketplaceIntegration
+# Import will be done in __init__ to avoid circular imports
+# We'll import LmntMarketplaceIntegration dynamically
 
 class LmntMarketplacePlugin:
     """
@@ -24,6 +24,9 @@ class LmntMarketplacePlugin:
         self.server = config.get_server()
         self.klippy_apis = None
         logging.info("Initializing LMNT Marketplace Plugin (modular version)")
+        
+        # Import the modular integration dynamically to avoid circular imports
+        from .lmnt_marketplace import LmntMarketplaceIntegration
         
         # Initialize the modular integration
         self.integration = LmntMarketplaceIntegration(config, self.server)
