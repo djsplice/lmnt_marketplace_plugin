@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import traceback
+import json as jsonw
 
 from moonraker.common import RequestType
 
@@ -106,7 +107,12 @@ class LmntMarketplacePlugin:
         """Handle user login (legacy endpoint)"""
         try:
             # Extract login credentials from the request body
-            request_data = web_request.get_body_args()
+            try:
+                request_data = jsonw.loads(web_request.request.body)
+            except Exception:
+                logging.exception("Error parsing JSON request")
+                raise self.server.error("Invalid JSON in request body", 400)
+                
             username = request_data.get('username')
             password = request_data.get('password')
             
@@ -124,7 +130,12 @@ class LmntMarketplacePlugin:
         """Handle printer registration (legacy endpoint)"""
         try:
             # Extract registration data from the request body
-            request_data = web_request.get_body_args()
+            try:
+                request_data = jsonw.loads(web_request.request.body)
+            except Exception:
+                logging.exception("Error parsing JSON request")
+                raise self.server.error("Invalid JSON in request body", 400)
+                
             user_token = request_data.get('user_token')
             printer_name = request_data.get('printer_name')
             
