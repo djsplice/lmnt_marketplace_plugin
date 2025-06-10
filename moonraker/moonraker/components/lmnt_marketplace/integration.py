@@ -44,12 +44,14 @@ class LmntMarketplaceIntegration:
         lmnt_data_path = os.path.join(data_path, "lmnt_marketplace")
         self.tokens_path = os.path.join(lmnt_data_path, "tokens")
         self.keys_path = os.path.join(lmnt_data_path, "keys")
+        self.encrypted_path = os.path.join(lmnt_data_path, "encrypted")
         
         # Create directories if they don't exist
         os.makedirs(self.tokens_path, exist_ok=True)
         os.makedirs(self.keys_path, exist_ok=True)
+        os.makedirs(self.encrypted_path, exist_ok=True)
         
-        logging.info(f"LMNT data paths: tokens={self.tokens_path}, keys={self.keys_path}")
+        logging.info(f"LMNT data paths: tokens={self.tokens_path}, keys={self.keys_path}, encrypted={self.encrypted_path}")
         
         # API endpoints
         # Use configurable endpoints with defaults

@@ -234,6 +234,13 @@ class JobManager:
             logging.error(f"LMNT JOB POLLING: Unexpected error while polling for jobs: {str(e)}")
             import traceback
             logging.error(f"LMNT JOB POLLING: {traceback.format_exc()}")
+            
+            # Reset job state if an error occurred during processing
+            if self.current_print_job:
+                job_id = self.current_print_job.get('id')
+                logging.warning(f"LMNT JOB POLLING: Resetting current job {job_id} due to error")
+                self.current_print_job = None
+                self.job_start_time = None
     
     async def _process_pending_jobs(self, jobs):
         """Process pending print jobs from the marketplace"""
@@ -252,8 +259,22 @@ class JobManager:
         
         # Check if we have a current print job
         if self.current_print_job:
-            logging.info(f"LMNT PROCESS: Cannot process next job - printer is busy with job {self.current_print_job.get('id')}")
-            return
+            job_id = self.current_print_job.get('id')
+            # Check if the job has been stuck for too long (more than 5 minutes)
+            if hasattr(self, 'job_start_time') and self.job_start_time:
+                elapsed = time.time() - self.job_start_time
+                if elapsed > 300:  # 5 minutes
+                    logging.warning(f"LMNT PROCESS: Job {job_id} has been processing for {elapsed:.1f} seconds without completion")
+                    logging.warning(f"LMNT PROCESS: Resetting stuck job {job_id}")
+                    self.current_print_job = None
+                    self.job_start_time = None
+                    # Continue processing
+                else:
+                    logging.info(f"LMNT PROCESS: Cannot process next job - printer is busy with job {job_id} for {elapsed:.1f} seconds")
+                    return
+            else:
+                logging.info(f"LMNT PROCESS: Cannot process next job - printer is busy with job {job_id}")
+                return
         
         # Check if we have jobs in the queue
         if not self.print_job_queue:
@@ -314,7 +335,9 @@ class JobManager:
         
         # Set as current job
         self.current_print_job = job
-        logging.info(f"LMNT PROCESS: Set current_print_job to {job_id}")
+        self.job_start_time = time.time()
+        logging.info(f"LMNT PROCESS: Set current_print_job to {job_id} at {datetime.now().isoformat()}")
+        logging.info(f"LMNT PROCESS: Job start time recorded for timeout tracking")
         
         # Update job status to processing
         logging.info(f"LMNT PROCESS: Updating job status to 'processing'")
