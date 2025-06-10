@@ -39,10 +39,10 @@ class LmntMarketplaceIntegration:
         self.api_version = "1.0.0"
         
         # Initialize managers
-        self.auth_manager = auth.LmntAuthManager(config, server)
-        self.crypto_manager = crypto.LmntCryptoManager(config, server)
-        self.gcode_manager = gcode.LmntGcodeManager(config, server)
-        self.job_manager = jobs.LmntJobManager(config, server)
+        self.auth_manager = auth.AuthManager(self)
+        self.crypto_manager = crypto.CryptoManager(self)
+        self.gcode_manager = gcode.GCodeManager(self)
+        self.job_manager = jobs.JobManager(self)
         
         # Link managers to each other
         self.job_manager.set_auth_manager(self.auth_manager)
@@ -61,10 +61,10 @@ class LmntMarketplaceIntegration:
         self.klippy_apis = klippy_apis
         
         # Initialize managers with Klippy APIs
-        await self.auth_manager.initialize(klippy_apis)
-        await self.crypto_manager.initialize(klippy_apis)
-        await self.gcode_manager.initialize(klippy_apis)
-        await self.job_manager.initialize(klippy_apis)
+        await self.auth_manager.initialize(klippy_apis, None)
+        await self.crypto_manager.initialize(klippy_apis, None)
+        await self.gcode_manager.initialize(klippy_apis, None)
+        await self.job_manager.initialize(klippy_apis, None)
         
         # Start background tasks
         self.server.register_event_loop_callback(self._background_tasks)
