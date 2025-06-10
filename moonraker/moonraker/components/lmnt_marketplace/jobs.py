@@ -79,22 +79,35 @@ class JobManager:
         # Cancel any existing polling task
         if self.job_polling_task:
             self.job_polling_task.cancel()
+            logging.info("Previous job polling task cancelled")
+        
+        # Get poll interval from config or use default
+        poll_interval = self.integration.config.getint('check_interval', 60)
+        logging.info(f"Setting up job polling with interval of {poll_interval} seconds")
         
         # Start polling task
-        self.job_polling_task = asyncio.create_task(self._poll_for_jobs_loop())
+        self.job_polling_task = asyncio.create_task(self._poll_for_jobs_loop(poll_interval))
         logging.info("Job polling started")
     
-    async def _poll_for_jobs_loop(self):
-        """Continuously poll for new print jobs"""
-        poll_interval = 60  # seconds
+    async def _poll_for_jobs_loop(self, poll_interval=60):
+        """Continuously poll for new print jobs
+        
+        Args:
+            poll_interval: Interval in seconds between polls
+        """
+        logging.info(f"Starting job polling loop with {poll_interval} second interval")
         
         while True:
             try:
                 # Only poll if we have a valid printer token
                 if self.integration.auth_manager.printer_token:
+                    logging.debug("Polling for jobs with valid printer token")
                     await self._poll_for_jobs()
+                else:
+                    logging.warning("Skipping job poll: No valid printer token available")
                 
                 # Wait for next poll
+                logging.debug(f"Waiting {poll_interval} seconds until next job poll")
                 await asyncio.sleep(poll_interval)
             except asyncio.CancelledError:
                 logging.info("Job polling cancelled")
@@ -105,6 +118,7 @@ class JobManager:
     
     async def _poll_for_jobs(self):
         """Poll the marketplace for new print jobs"""
+        # Validate prerequisites
         if not self.integration.auth_manager.printer_token:
             logging.error("Cannot poll for jobs: No printer token available")
             return
@@ -118,12 +132,26 @@ class JobManager:
             logging.debug("Skipping job poll: Printer is busy with current job")
             return
         
+        # Construct API URL
+        printer_id = self.integration.auth_manager.printer_id
         jobs_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/printer-jobs"
         
+        logging.info(f"Polling for jobs at: {jobs_url} for printer ID: {printer_id}")
+        
         try:
-            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+            # Prepare headers with authentication token
+            token = self.integration.auth_manager.printer_token
+            redacted_token = token[:5] + "..." if token and len(token) > 8 else "[NONE]"
+            headers = {"Authorization": f"Bearer {token}"}
             
+            logging.debug(f"Sending job poll request with token: {redacted_token}")
+            
+            # Make API request
+            start_time = time.time()
             async with self.http_client.get(jobs_url, headers=headers) as response:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                logging.debug(f"Job poll response received in {elapsed_ms}ms with status: {response.status}")
+                
                 if response.status == 200:
                     data = await response.json()
                     jobs = data.get('jobs', [])
@@ -133,11 +161,25 @@ class JobManager:
                         await self._process_pending_jobs(jobs)
                     else:
                         logging.debug("No pending jobs found")
+                elif response.status == 401:
+                    error_text = await response.text()
+                    logging.error(f"Authentication failed during job polling: {error_text}")
+                    logging.info("Will attempt to refresh printer token before next poll")
+                    await self.integration.auth_manager.refresh_printer_token()
                 else:
                     error_text = await response.text()
                     logging.error(f"Job polling failed with status {response.status}: {error_text}")
+        except aiohttp.ClientConnectorError as e:
+            logging.error(f"Connection error while polling for jobs: {str(e)}")
+        except aiohttp.ClientError as e:
+            logging.error(f"HTTP client error while polling for jobs: {str(e)}")
+        except asyncio.TimeoutError:
+            logging.error("Timeout while polling for jobs")
         except Exception as e:
-            logging.error(f"Error polling for jobs: {str(e)}")
+            logging.error(f"Unexpected error polling for jobs: {str(e)}")
+            import traceback
+            logging.debug(f"Job polling exception traceback: {traceback.format_exc()}")
+
     
     async def _process_pending_jobs(self, jobs):
         """Process pending print jobs from the marketplace"""
@@ -153,6 +195,27 @@ class JobManager:
         # Process next job if printer is ready
         if not self.current_print_job and self.print_job_queue:
             await self._process_next_job()
+    
+    async def handle_klippy_shutdown(self):
+        """Handle Klippy shutdown event"""
+        logging.info("LMNT Job Manager: Handling Klippy shutdown")
+        
+        # Cancel job polling task
+        if self.job_polling_task and not self.job_polling_task.done():
+            self.job_polling_task.cancel()
+            try:
+                await self.job_polling_task
+            except asyncio.CancelledError:
+                logging.info("Job polling task cancelled due to Klippy shutdown")
+            except Exception as e:
+                logging.error(f"Error cancelling job polling task: {str(e)}")
+        
+        # Reset state
+        self.job_polling_task = None
+        self.current_print_job = None
+        self.print_job_started = False
+        
+        logging.info("LMNT Job Manager: Shutdown handling complete")
     
     async def _process_next_job(self):
         """Process the next job in the queue"""
