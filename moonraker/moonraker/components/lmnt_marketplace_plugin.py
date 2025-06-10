@@ -105,10 +105,10 @@ class LmntMarketplacePlugin:
     async def _handle_user_login(self, web_request):
         """Handle user login (legacy endpoint)"""
         try:
-            # Extract login credentials
-            login_data = web_request.get_json_args()
-            username = login_data.get('username')
-            password = login_data.get('password')
+            # Extract login credentials from the request body
+            request_data = web_request.get_body_args()
+            username = request_data.get('username')
+            password = request_data.get('password')
             
             if not username or not password:
                 raise self.server.error("Missing username or password", 400)
@@ -123,10 +123,10 @@ class LmntMarketplacePlugin:
     async def _handle_register_printer(self, web_request):
         """Handle printer registration (legacy endpoint)"""
         try:
-            # Extract registration data
-            reg_data = web_request.get_json_args()
-            user_token = reg_data.get('user_token')
-            printer_name = reg_data.get('printer_name')
+            # Extract registration data from the request body
+            request_data = web_request.get_body_args()
+            user_token = request_data.get('user_token')
+            printer_name = request_data.get('printer_name')
             
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
