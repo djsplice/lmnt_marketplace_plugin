@@ -76,6 +76,8 @@ class JobManager:
     
     def setup_job_polling(self):
         """Set up periodic polling for print jobs"""
+        logging.info("LMNT JOB POLLING: setup_job_polling method called")
+        
         # Cancel any existing polling task
         if self.job_polling_task:
             self.job_polling_task.cancel()
@@ -86,7 +88,14 @@ class JobManager:
         logging.info(f"Setting up job polling with interval of {poll_interval} seconds")
         
         # Start polling task
-        self.job_polling_task = asyncio.create_task(self._poll_for_jobs_loop(poll_interval))
+        try:
+            self.job_polling_task = asyncio.create_task(self._poll_for_jobs_loop(poll_interval))
+            logging.info("LMNT JOB POLLING: Task created successfully")
+        except Exception as e:
+            logging.error(f"LMNT JOB POLLING: Failed to create polling task: {str(e)}")
+            import traceback
+            logging.error(f"LMNT JOB POLLING: {traceback.format_exc()}")
+        
         logging.info("Job polling started")
     
     async def _poll_for_jobs_loop(self, poll_interval=60):
@@ -95,25 +104,36 @@ class JobManager:
         Args:
             poll_interval: Interval in seconds between polls
         """
-        logging.info(f"Starting job polling loop with {poll_interval} second interval")
+        logging.info(f"LMNT JOB POLLING: _poll_for_jobs_loop started with {poll_interval} second interval")
+        
+        # Log initial token status
+        token_status = "available" if self.integration.auth_manager.printer_token else "not available"
+        logging.info(f"LMNT JOB POLLING: Initial printer token status: {token_status}")
+        
+        poll_count = 0
         
         while True:
             try:
+                poll_count += 1
+                logging.info(f"LMNT JOB POLLING: Poll attempt #{poll_count}")
+                
                 # Only poll if we have a valid printer token
                 if self.integration.auth_manager.printer_token:
-                    logging.debug("Polling for jobs with valid printer token")
+                    logging.info(f"LMNT JOB POLLING: Polling for jobs with valid printer token")
                     await self._poll_for_jobs()
                 else:
-                    logging.warning("Skipping job poll: No valid printer token available")
+                    logging.warning(f"LMNT JOB POLLING: Skipping poll #{poll_count} - No printer token available")
                 
                 # Wait for next poll
-                logging.debug(f"Waiting {poll_interval} seconds until next job poll")
+                logging.info(f"LMNT JOB POLLING: Waiting {poll_interval} seconds until next job poll")
                 await asyncio.sleep(poll_interval)
             except asyncio.CancelledError:
-                logging.info("Job polling cancelled")
+                logging.info("LMNT JOB POLLING: Job polling cancelled")
                 break
             except Exception as e:
-                logging.error(f"Error in job polling: {str(e)}")
+                logging.error(f"LMNT JOB POLLING: Error in poll #{poll_count}: {str(e)}")
+                import traceback
+                logging.error(f"LMNT JOB POLLING: Exception traceback: {traceback.format_exc()}")
                 await asyncio.sleep(poll_interval)
     
     async def _poll_for_jobs(self):
