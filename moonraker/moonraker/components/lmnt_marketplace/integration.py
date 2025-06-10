@@ -109,8 +109,10 @@ class LmntMarketplaceIntegration:
         """
         Start background tasks for the integration
         """
-        # Start job polling
-        self.server.register_event_loop_callback(self.job_manager.setup_job_polling)
+        # Start job polling directly
+        logging.info("LMNT Integration: Directly starting job polling")
+        self.job_manager.setup_job_polling()
+        logging.info("LMNT Integration: Job polling setup completed")
     
     async def handle_klippy_shutdown(self):
         """
