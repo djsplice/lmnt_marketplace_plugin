@@ -106,47 +106,47 @@ class LmntMarketplacePlugin:
         """Handle user login (legacy endpoint)"""
         try:
             # Extract login credentials
-            login_data = await web_request.get_json_data()
+            login_data = web_request.get_json_args()
             username = login_data.get('username')
             password = login_data.get('password')
             
             if not username or not password:
-                raise web_request.error("Missing username or password", 400)
+                raise self.server.error("Missing username or password", 400)
             
             # Delegate to the auth manager
             result = await self.integration.auth_manager.login_user(username, password)
             return result
         except Exception as e:
             logging.error(f"Error during user login: {str(e)}")
-            raise web_request.error(str(e), 500)
+            raise self.server.error(str(e), 500)
     
     async def _handle_register_printer(self, web_request):
         """Handle printer registration (legacy endpoint)"""
         try:
             # Extract registration data
-            reg_data = await web_request.get_json_data()
+            reg_data = web_request.get_json_args()
             user_token = reg_data.get('user_token')
             printer_name = reg_data.get('printer_name')
             
             if not user_token or not printer_name:
-                raise web_request.error("Missing user token or printer name", 400)
+                raise self.server.error("Missing user token or printer name", 400)
             
             # Delegate to the auth manager
             result = await self.integration.auth_manager.register_printer(user_token, printer_name)
             return result
         except Exception as e:
             logging.error(f"Error during printer registration: {str(e)}")
-            raise web_request.error(str(e), 500)
+            raise self.server.error(str(e), 500)
     
     async def _handle_manual_check_jobs(self, web_request):
         """Handle manual job check (legacy endpoint)"""
         try:
             # Delegate to the job manager
             result = await self.integration.job_manager.check_for_jobs()
-            return {"status": "success", "jobs": result}
+            return {"status": "success", "message": "Job check initiated"}
         except Exception as e:
-            logging.error(f"Error checking for jobs: {str(e)}")
-            raise web_request.error(str(e), 500)
+            logging.error(f"Error initiating job check: {str(e)}")
+            raise self.server.error(str(e), 500)
     
     async def _handle_status(self, web_request):
         """Handle status request (legacy endpoint)"""
@@ -165,7 +165,7 @@ class LmntMarketplacePlugin:
             return status
         except Exception as e:
             logging.error(f"Error getting status: {str(e)}")
-            raise web_request.error(str(e), 500)
+            raise self.server.error(str(e), 500)
 
 
 def load_component(config):

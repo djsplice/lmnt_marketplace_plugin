@@ -570,3 +570,18 @@ class JobManager:
         except Exception as e:
             logging.error(f"Error handling start job request: {str(e)}")
             raise web_request.error(str(e), 500)
+
+    async def get_status(self):
+        """
+        Get the current job status
+        
+        Returns:
+            dict: Job status information
+        """
+        status = {
+            "current_job": self.current_print_job,
+            "queue_length": len(self.print_job_queue),
+            "job_started": self.print_job_started,
+            "last_check": datetime.now().isoformat()
+        }
+        return status

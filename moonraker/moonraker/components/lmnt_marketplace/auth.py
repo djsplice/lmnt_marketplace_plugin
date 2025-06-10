@@ -364,6 +364,20 @@ class AuthManager:
             raise web_request.error(
                 "Failed to refresh printer token", 500)
     
+    def get_status(self):
+        """
+        Get the current authentication status
+        
+        Returns:
+            dict: Authentication status information
+        """
+        status = {
+            "authenticated": self.printer_token is not None,
+            "printer_id": self.printer_id,
+            "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None
+        }
+        return status
+    
     def validate_printer_token(self, token):
         """
         Validate a printer token
@@ -372,26 +386,21 @@ class AuthManager:
             dict: Token payload if valid
             None: If token is invalid
         """
-        if not token:
-            return None
-        
         try:
-            # In a production environment, this should verify the signature
-            # For now, we just decode and check expiration
-            payload = jwt.decode(token, options={"verify_signature": False})
+            # Decode the token without verification first to get the algorithm
+            unverified_payload = jwt.decode(token, options={"verify_signature": False})
+            
+            # Now verify with the appropriate algorithm
+            algorithm = unverified_payload.get('alg', 'HS256')
+            payload = jwt.decode(token, "secret", algorithms=[algorithm])
             
             # Check if token is expired
-            exp_timestamp = payload.get('exp')
-            if not exp_timestamp:
-                logging.error("Token missing expiration claim")
-                return None
-            
-            expiry = datetime.fromtimestamp(exp_timestamp)
-            if datetime.now() > expiry:
-                logging.error("Token is expired")
+            exp = payload.get('exp')
+            if exp and datetime.fromtimestamp(exp) < datetime.now():
+                logging.warning("Printer token has expired")
                 return None
             
             return payload
-        except jwt.PyJWTError as e:
-            logging.error(f"Token validation error: {str(e)}")
+        except Exception as e:
+            logging.error(f"Error validating printer token: {str(e)}")
             return None
