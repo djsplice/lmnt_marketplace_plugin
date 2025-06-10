@@ -106,13 +106,15 @@ class LmntMarketplacePlugin:
     async def _handle_user_login(self, web_request):
         """Handle user login (legacy endpoint)"""
         try:
-            # Simple approach: try to parse the body as JSON
-            try:
-                body_str = web_request.body.decode('utf-8')
-                args = jsonw.loads(body_str)
-            except Exception:
-                logging.exception("Error parsing JSON request")
-                raise self.server.error("Invalid JSON in request body", 400)
+            # Parse the request using Moonraker's approach
+            args = {}
+            content_type = web_request.request.headers.get('Content-Type', "").strip()
+            if content_type.startswith("application/json"):
+                try:
+                    args = jsonw.loads(web_request.request.body)
+                except Exception:
+                    logging.exception("Error parsing JSON request")
+                    raise self.server.error("Invalid JSON in request body", 400)
             
             username = args.get('username')
             password = args.get('password')
@@ -130,13 +132,15 @@ class LmntMarketplacePlugin:
     async def _handle_register_printer(self, web_request):
         """Handle printer registration (legacy endpoint)"""
         try:
-            # Simple approach: try to parse the body as JSON
-            try:
-                body_str = web_request.body.decode('utf-8')
-                args = jsonw.loads(body_str)
-            except Exception:
-                logging.exception("Error parsing JSON request")
-                raise self.server.error("Invalid JSON in request body", 400)
+            # Parse the request using Moonraker's approach
+            args = {}
+            content_type = web_request.request.headers.get('Content-Type', "").strip()
+            if content_type.startswith("application/json"):
+                try:
+                    args = jsonw.loads(web_request.request.body)
+                except Exception:
+                    logging.exception("Error parsing JSON request")
+                    raise self.server.error("Invalid JSON in request body", 400)
             
             user_token = args.get('user_token')
             printer_name = args.get('printer_name')
