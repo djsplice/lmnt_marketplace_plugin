@@ -155,3 +155,15 @@ class LmntMarketplacePlugin:
         except Exception as e:
             logging.error(f"Error getting status: {str(e)}")
             raise web_request.error(str(e), 500)
+
+
+def load_component(config):
+    """Load the LMNT Marketplace Plugin component
+    
+    Args:
+        config: component configuration
+    
+    Returns:
+        LmntMarketplacePlugin: initialized plugin instance
+    """
+    return LmntMarketplacePlugin(config)
