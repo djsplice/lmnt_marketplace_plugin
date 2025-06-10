@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import traceback
+import json as jsonw
 
 from moonraker.common import RequestType
 
@@ -65,6 +66,12 @@ class LmntMarketplacePlugin:
         """Called when Klippy reports shutdown"""
         self.klippy_apis = None
         await self.integration.handle_klippy_shutdown()
+        
+    async def close(self):
+        """Called when Moonraker is shutting down"""
+        logging.info("LMNT Marketplace Plugin shutting down")
+        if hasattr(self, 'integration'):
+            await self.integration.close()
     
     def _register_legacy_endpoints(self):
         """Register legacy endpoints for backward compatibility"""
@@ -73,27 +80,39 @@ class LmntMarketplacePlugin:
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/user_login", 
                 RequestType.POST, 
-                self._handle_user_login
+                self._handle_user_login,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/register_printer", 
                 RequestType.POST, 
-                self._handle_register_printer
+                self._handle_register_printer,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             # Manual job check endpoint (for local UI use only)
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/check_jobs", 
                 RequestType.POST, 
-                self._handle_manual_check_jobs
+                self._handle_manual_check_jobs,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             # Status endpoint
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/status", 
                 RequestType.GET, 
-                self._handle_status
+                self._handle_status,
+                auth_required=False  # Bypass Moonraker's JWT validation
+            )
+            
+            # Token refresh endpoint
+            self.server.register_endpoint(
+                "/machine/lmnt_marketplace/refresh_token", 
+                RequestType.POST, 
+                self._handle_refresh_token,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             logging.info("Registered LMNT Marketplace legacy endpoints")
@@ -105,13 +124,33 @@ class LmntMarketplacePlugin:
     async def _handle_user_login(self, web_request):
         """Handle user login (legacy endpoint)"""
         try:
-            # Extract login credentials from the request body
-            request_data = web_request.get_body_args()
-            username = request_data.get('username')
-            password = request_data.get('password')
+            # Parse the request arguments
+            args = {}
+            
+            # Try to get arguments from the request
+            for key in web_request.get_args():
+                args[key] = web_request.get_str(key)
+            
+            # If no arguments found, try to parse JSON from the body
+            if not args:
+                try:
+                    # Get the raw body data
+                    body = web_request.get_body()
+                    if body:
+                        args = jsonw.loads(body)
+                except Exception:
+                    logging.exception("Error parsing JSON request")
+                    raise self.server.error("Invalid JSON in request body", 400)
+            
+            username = args.get('username')
+            password = args.get('password')
             
             if not username or not password:
                 raise self.server.error("Missing username or password", 400)
+            
+            # Log the request details
+            logging.info(f"Login request for user: {username}")
+            logging.info(f"Using CWS URL: {self.integration.cws_url}")
             
             # Delegate to the auth manager
             result = await self.integration.auth_manager.login_user(username, password)
@@ -123,16 +162,44 @@ class LmntMarketplacePlugin:
     async def _handle_register_printer(self, web_request):
         """Handle printer registration (legacy endpoint)"""
         try:
-            # Extract registration data from the request body
-            request_data = web_request.get_body_args()
-            user_token = request_data.get('user_token')
-            printer_name = request_data.get('printer_name')
+            # Parse the request arguments
+            args = {}
+            
+            # Try to get arguments from the request
+            for key in web_request.get_args():
+                args[key] = web_request.get_str(key)
+            
+            # If no arguments found, try to parse JSON from the body
+            if not args:
+                try:
+                    # Get the raw body data
+                    body = web_request.get_body()
+                    if body:
+                        args = jsonw.loads(body)
+                except Exception:
+                    logging.exception("Error parsing JSON request")
+                    raise self.server.error("Invalid JSON in request body", 400)
+            
+            user_token = args.get('user_token')
+            printer_name = args.get('printer_name')
+            manufacturer = args.get('manufacturer')
+            model = args.get('model')
+            
+            # Only use token from request body
+            if not user_token:
+                logging.warning("No user_token provided in request body")
+            else:
+                logging.info("Using token from request body")
             
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
             
+            # Log registration request details
+            logging.info(f"Registering printer: {printer_name}, Manufacturer: {manufacturer}, Model: {model}")
+            
             # Delegate to the auth manager
-            result = await self.integration.auth_manager.register_printer(user_token, printer_name)
+            result = await self.integration.auth_manager.register_printer(
+                user_token, printer_name, manufacturer, model)
             return result
         except Exception as e:
             logging.error(f"Error during printer registration: {str(e)}")
@@ -141,9 +208,9 @@ class LmntMarketplacePlugin:
     async def _handle_manual_check_jobs(self, web_request):
         """Handle manual job check (legacy endpoint)"""
         try:
-            # Delegate to the job manager
-            result = await self.integration.job_manager.check_for_jobs()
-            return {"status": "success", "message": "Job check initiated"}
+            # For now, just return job status since check_for_jobs is not implemented
+            job_status = await self.integration.job_manager.get_status()
+            return {"status": "success", "message": "Job status retrieved", "job_status": job_status}
         except Exception as e:
             logging.error(f"Error initiating job check: {str(e)}")
             raise self.server.error(str(e), 500)
@@ -165,6 +232,24 @@ class LmntMarketplacePlugin:
             return status
         except Exception as e:
             logging.error(f"Error getting status: {str(e)}")
+            raise self.server.error(str(e), 500)
+            
+    async def _handle_refresh_token(self, web_request):
+        """Handle printer token refresh (legacy endpoint)"""
+        try:
+            # Delegate to the auth manager
+            result = await self.integration.auth_manager.refresh_printer_token()
+            if result:
+                return {
+                    "status": "success",
+                    "printer_id": self.integration.auth_manager.printer_id,
+                    "expiry": self.integration.auth_manager.token_expiry.isoformat() 
+                            if self.integration.auth_manager.token_expiry else None
+                }
+            else:
+                raise self.server.error("Failed to refresh printer token", 500)
+        except Exception as e:
+            logging.error(f"Error refreshing printer token: {str(e)}")
             raise self.server.error(str(e), 500)
 
 

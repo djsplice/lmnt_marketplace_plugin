@@ -14,6 +14,7 @@ import asyncio
 import aiohttp
 import time
 import base64
+import re
 from datetime import datetime, timedelta
 import jwt
 
@@ -32,14 +33,51 @@ class AuthManager:
         self.token_expiry = None
         self.user_token = None  # Temporary storage for user JWT during registration
         self.printer_id = None
+        self.klippy_apis = None
+        
+        # Create HTTP client for API calls
+        self.http_client = aiohttp.ClientSession()
+        logging.info("Created HTTP client for AuthManager")
         
         # Load existing printer token if available
         self.load_printer_token()
+        
+    def _redact_sensitive_data(self, data, is_json=False):
+        """Redact sensitive information from logs when debug mode is disabled"""
+        if self.integration.debug_mode:
+            return data
+            
+        # If it's JSON data, convert to string for processing
+        if is_json and isinstance(data, dict):
+            data_str = json.dumps(data)
+        else:
+            data_str = str(data)
+            
+        # Redact JWT tokens
+        jwt_pattern = r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'  
+        redacted_str = re.sub(jwt_pattern, '[REDACTED_TOKEN]', data_str)
+        
+        # Redact passwords
+        if '"password"' in redacted_str:
+            redacted_str = re.sub(r'"password"\s*:\s*"[^"]*"', '"password":"[REDACTED]"', redacted_str)
+            
+        # Convert back to dict if it was JSON
+        if is_json and isinstance(data, dict):
+            try:
+                return json.loads(redacted_str)
+            except json.JSONDecodeError:
+                return {"redacted": "[JSON with redacted values]"}
+        
+        return redacted_str
     
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
         self.klippy_apis = klippy_apis
-        self.http_client = http_client
+        
+        # Use the provided HTTP client if not already created
+        if http_client is not None and not hasattr(self, 'http_client'):
+            self.http_client = http_client
+            logging.info("Using provided HTTP client for AuthManager")
     
     def register_endpoints(self, register_endpoint):
         """Register HTTP endpoints for authentication"""
@@ -112,14 +150,18 @@ class AuthManager:
                     'expiry': expiry.isoformat() if expiry else None
                 }, f)
             
-            # Update current token and expiry
+            # Update in-memory token
             self.printer_token = token
             self.token_expiry = expiry
             
             # Extract printer_id from token
             self.printer_id = self._get_printer_id_from_token()
             
-            logging.info(f"Saved printer token for printer ID: {self.printer_id}")
+            # Log with redacted token if not in debug mode
+            if self.integration.debug_mode:
+                logging.info(f"Saved printer token: {token} for printer ID: {self.printer_id}")
+            else:
+                logging.info(f"Saved printer token for printer ID: {self.printer_id}")
             return True
         except IOError as e:
             logging.error(f"Error saving printer token: {str(e)}")
@@ -171,26 +213,48 @@ class AuthManager:
             logging.error("Cannot refresh printer token: No token available")
             return False
         
-        refresh_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/refresh-printer-token"
+        refresh_url = f"{self.integration.marketplace_url}/api/refresh-printer-token"
         
         try:
             headers = {"Authorization": f"Bearer {self.printer_token}"}
             
+            # Redact sensitive information in headers
+            redacted_headers = self._redact_sensitive_data(headers)
+            logging.info(f"Sending token refresh request with headers: {redacted_headers}")
+            
             async with self.http_client.post(refresh_url, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
-                    new_token = data.get('token')
+                    # Redact sensitive information in response
+                    redacted_data = self._redact_sensitive_data(data, is_json=True)
+                    logging.info(f"Token refresh response: {redacted_data}")
+                    # Try both field names - some APIs use 'token', others use 'printer_token'
+                    new_token = data.get('printer_token') or data.get('token')
                     
                     if new_token:
-                        # Calculate expiry (30 days from now)
-                        expiry = datetime.now() + timedelta(days=30)
+                        # Get expiry from response or calculate it
+                        # Try both field names - some APIs use 'token_expires', others use 'expiry'
+                        token_expires = data.get('token_expires') or data.get('expiry')
+                        expiry = None
+                        if token_expires:
+                            try:
+                                expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
+                                logging.info(f"Using expiry date from response: {expiry}")
+                            except ValueError:
+                                # Calculate expiry (30 days from now) if parsing fails
+                                expiry = datetime.now() + timedelta(days=30)
+                                logging.warning(f"Could not parse token expiry: {token_expires}, using default")
+                        else:
+                            # Calculate expiry (30 days from now) if not provided
+                            expiry = datetime.now() + timedelta(days=30)
+                            logging.info("No expiry in response, using default 30 days")
                         
                         # Save the new token
                         self.save_printer_token(new_token, expiry)
                         logging.info("Printer token refreshed successfully")
                         return True
                     else:
-                        logging.error("Token refresh response missing token field")
+                        logging.error("Token refresh response missing token or printer_token field")
                 else:
                     error_text = await response.text()
                     logging.error(f"Token refresh failed with status {response.status}: {error_text}")
@@ -202,6 +266,60 @@ class AuthManager:
             60 * 60, self.check_token_refresh)
         return False
     
+    async def login_user(self, username, password):
+        """Login user to the LMNT Marketplace
+        
+        Args:
+            username: User's email or username
+            password: User's password
+            
+        Returns:
+            dict: Login response with token
+        """
+        try:
+            if not username or not password:
+                raise self.integration.server.error("Missing username or password", 400)
+            
+            # Authenticate with CWS using the correct endpoint
+            login_url = f"{self.integration.cws_url}/auth/login"
+            logging.info(f"Attempting login with URL: {login_url}")
+            
+            # Create payload but redact for logging
+            payload = {"email": username, "password": password}
+            redacted_payload = self._redact_sensitive_data(payload, is_json=True)
+            logging.info(f"Login request payload: {redacted_payload}")
+            
+            async with self.http_client.post(
+                login_url, 
+                json=payload
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"CWS login failed: {error_text}")
+                    raise self.integration.server.error(f"Login failed: {error_text}", response.status)
+                
+                data = await response.json()
+                # Redact sensitive information in response for logging
+                redacted_data = self._redact_sensitive_data(data, is_json=True)
+                logging.info(f"Login response: {redacted_data}")
+                
+                token = data.get('token')
+                
+                if not token:
+                    raise self.integration.server.error("Login response missing token", 500)
+                
+                # Store user token temporarily for printer registration
+                self.user_token = token
+                
+                # Return success but redact token in response to client
+                return {"status": "success", "token": "[TOKEN_RECEIVED]"} if not self.integration.debug_mode else {"status": "success", "token": token}
+        except aiohttp.ClientError as e:
+            logging.error(f"HTTP error during user login: {str(e)}")
+            raise self.integration.server.error(f"Connection error: {str(e)}", 500)
+        except Exception as e:
+            logging.error(f"Error during user login: {str(e)}")
+            raise self.integration.server.error(f"Login error: {str(e)}", 500)
+            
     async def _handle_user_login(self, web_request):
         """Handle user login to the CWS and obtain user JWT"""
         try:
@@ -214,39 +332,101 @@ class AuthManager:
                 raise web_request.error(
                     "Missing email or password", 400)
             
-            # Authenticate with CWS
-            login_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/login"
-            
-            async with self.http_client.post(
-                login_url, 
-                json={"email": email, "password": password}
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"CWS login failed: {error_text}")
-                    raise web_request.error(
-                        f"Login failed: {error_text}", response.status)
-                
-                data = await response.json()
-                token = data.get('token')
-                
-                if not token:
-                    raise web_request.error(
-                        "Login response missing token", 500)
-                
-                # Store user token temporarily for printer registration
-                self.user_token = token
-                
-                return {"status": "success", "token": token}
-        except aiohttp.ClientError as e:
-            logging.error(f"HTTP error during user login: {str(e)}")
-            raise web_request.error(
-                f"Connection error: {str(e)}", 500)
+            result = await self.login_user(email, password)
+            return result
         except Exception as e:
-            logging.error(f"Error during user login: {str(e)}")
-            raise web_request.error(
-                f"Login error: {str(e)}", 500)
+            logging.error(f"Error during user login handler: {str(e)}")
+            raise web_request.error(f"Login error: {str(e)}", 500)
     
+    async def register_printer(self, user_token, printer_name, manufacturer=None, model=None):
+        """
+        Register printer with the LMNT Marketplace
+        
+        Args:
+            user_token: User's JWT token
+            printer_name: Name for the printer
+            manufacturer: Printer manufacturer (optional)
+            model: Printer model (optional)
+            
+        Returns:
+            dict: Registration response
+        """
+        try:
+            if not printer_name:
+                raise self.integration.server.error("Missing printer name", 400)
+            
+            if not user_token:
+                raise self.integration.server.error("Missing user token", 401)
+            
+            # Store user token temporarily for registration
+            self.user_token = user_token
+            
+            # Register printer with marketplace using the correct endpoint
+            register_url = f"{self.integration.marketplace_url}/api/register-printer"
+            logging.info(f"Registering printer with URL: {register_url}")
+            
+            # Use standard Authorization header for the marketplace API
+            headers = {"Authorization": f"Bearer {self.user_token}"}
+            
+            # Build payload with all required fields
+            payload = {
+                "printer_name": printer_name,
+                "manufacturer": manufacturer or "LMNT Printer",
+                "model": model or "Klipper"
+            }
+            logging.info(f"Registering printer with payload: {payload}")
+            
+            # Redact sensitive information in headers
+            redacted_headers = self._redact_sensitive_data(headers)            
+            logging.info(f"Sending registration request with headers: {redacted_headers}")
+            try:
+                async with self.http_client.post(
+                    register_url,
+                    headers=headers,
+                    json=payload
+                ) as response:
+                    response_text = await response.text()
+                    logging.info(f"Registration response status: {response.status}")
+                    
+                    # Redact sensitive information in response
+                    redacted_response = self._redact_sensitive_data(response_text)
+                    logging.info(f"Registration response body: {redacted_response}")
+                    
+                    if response.status != 200 and response.status != 201:
+                        logging.error(f"Printer registration failed: {response_text}")
+                        raise self.integration.server.error(f"Registration failed: {response_text}", response.status)
+                    
+                    # Try to parse as JSON if possible
+                    try:
+                        data = json.loads(response_text)
+                        printer_token = data.get('printer_token')  # Changed from 'token' to 'printer_token'
+                        if printer_token:
+                            # Save token and expiry
+                            token_expires = data.get('token_expires')
+                            expiry = None
+                            if token_expires:
+                                try:
+                                    expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
+                                except ValueError:
+                                    logging.warning(f"Could not parse token expiry: {token_expires}")
+                            
+                            self.save_printer_token(printer_token, expiry)
+                            logging.info("Printer token saved successfully")
+                            self.printer_id = data.get('id')
+                        return data
+                    except json.JSONDecodeError:
+                        logging.warning("Response was not valid JSON, returning as text")
+                        return {"success": True, "message": response_text}
+            except Exception as e:
+                logging.error(f"Exception during registration request: {str(e)}")
+                raise self.integration.server.error(f"Registration request error: {str(e)}", 500)
+        except aiohttp.ClientError as e:
+            logging.error(f"HTTP error during printer registration: {str(e)}")
+            raise self.integration.server.error(f"Connection error: {str(e)}", 500)
+        except Exception as e:
+            logging.error(f"Error during printer registration: {str(e)}")
+            raise self.integration.server.error(f"Registration error: {str(e)}", 500)
+            
     async def _handle_register_printer(self, web_request):
         """Handle printer registration with marketplace"""
         try:
@@ -262,52 +442,11 @@ class AuthManager:
                 raise web_request.error(
                     "User must login first", 401)
             
-            # Register printer with marketplace
-            register_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/register-printer"
-            
-            headers = {"Authorization": f"Bearer {self.user_token}"}
-            
-            async with self.http_client.post(
-                register_url,
-                headers=headers,
-                json={"name": printer_name}
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"Printer registration failed: {error_text}")
-                    raise web_request.error(
-                        f"Registration failed: {error_text}", response.status)
-                
-                data = await response.json()
-                printer_token = data.get('token')
-                encrypted_psek = data.get('kek_id')  # Actually contains encrypted PSEK
-                
-                if not printer_token:
-                    raise web_request.error(
-                        "Registration response missing token", 500)
-                
-                # Calculate expiry (30 days from now)
-                expiry = datetime.now() + timedelta(days=30)
-                
-                # Save the printer token
-                self.save_printer_token(printer_token, expiry)
-                
-                # Save the encrypted PSEK if provided
-                if encrypted_psek:
-                    self.integration.crypto_manager._save_encrypted_psek(encrypted_psek)
-                
-                # Clear user token after registration
-                self.user_token = None
-                
-                return {"status": "success", "printer_id": self.printer_id}
-        except aiohttp.ClientError as e:
-            logging.error(f"HTTP error during printer registration: {str(e)}")
-            raise web_request.error(
-                f"Connection error: {str(e)}", 500)
+            result = await self.register_printer(self.user_token, printer_name)
+            return result
         except Exception as e:
-            logging.error(f"Error during printer registration: {str(e)}")
-            raise web_request.error(
-                f"Registration error: {str(e)}", 500)
+            logging.error(f"Error during printer registration handler: {str(e)}")
+            raise web_request.error(f"Registration error: {str(e)}", 500)
     
     async def _handle_manual_register(self, web_request):
         """Handle manual printer registration with the LMNT Marketplace"""
@@ -371,12 +510,22 @@ class AuthManager:
         Returns:
             dict: Authentication status information
         """
-        status = {
+        return {
             "authenticated": self.printer_token is not None,
             "printer_id": self.printer_id,
             "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None
         }
-        return status
+        
+    async def handle_klippy_shutdown(self):
+        """Handle Klippy shutdown"""
+        self.klippy_apis = None
+        
+    async def close(self):
+        """Close the manager and release resources"""
+        if hasattr(self, 'http_client') and self.http_client is not None:
+            await self.http_client.close()
+            logging.info("Closed HTTP client for AuthManager")
+            self.http_client = None
     
     def validate_printer_token(self, token):
         """
