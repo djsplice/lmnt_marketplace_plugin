@@ -237,6 +237,8 @@ class JobManager:
     
     async def _process_pending_jobs(self, jobs):
         """Process pending print jobs from the marketplace"""
+        logging.info(f"LMNT PROCESS: Processing {len(jobs)} pending jobs")
+        
         # Add new jobs to queue
         for job in jobs:
             job_id = job.get('id')
@@ -244,11 +246,23 @@ class JobManager:
             # Check if job is already in queue
             if job_id and not any(j.get('id') == job_id for j in self.print_job_queue):
                 self.print_job_queue.append(job)
-                logging.info(f"Added job {job_id} to queue")
+                logging.info(f"LMNT PROCESS: Added job {job_id} to queue. Queue now has {len(self.print_job_queue)} jobs")
+            else:
+                logging.info(f"LMNT PROCESS: Job {job_id} already in queue or has invalid ID")
+        
+        # Check if we have a current print job
+        if self.current_print_job:
+            logging.info(f"LMNT PROCESS: Cannot process next job - printer is busy with job {self.current_print_job.get('id')}")
+            return
+        
+        # Check if we have jobs in the queue
+        if not self.print_job_queue:
+            logging.info(f"LMNT PROCESS: No jobs in queue to process")
+            return
         
         # Process next job if printer is ready
-        if not self.current_print_job and self.print_job_queue:
-            await self._process_next_job()
+        logging.info(f"LMNT PROCESS: Attempting to process next job from queue with {len(self.print_job_queue)} jobs")
+        await self._process_next_job()
     
     async def handle_klippy_shutdown(self):
         """Handle Klippy shutdown event"""
@@ -273,66 +287,95 @@ class JobManager:
     
     async def _process_next_job(self):
         """Process the next job in the queue"""
+        logging.info("LMNT PROCESS: _process_next_job called")
+        
         if not self.print_job_queue:
-            logging.debug("No jobs in queue to process")
+            logging.info("LMNT PROCESS: No jobs in queue to process")
             return
         
         # Check if printer is ready
+        logging.info("LMNT PROCESS: Checking if printer is ready")
         is_ready = await self._check_printer_ready()
         if not is_ready:
-            logging.info("Printer not ready for next job")
+            logging.info("LMNT PROCESS: Printer not ready for next job")
             return
+        
+        logging.info("LMNT PROCESS: Printer is ready, proceeding with job")
         
         # Get next job from queue
         job = self.print_job_queue.pop(0)
         job_id = job.get('id')
         
         if not job_id:
-            logging.error("Invalid job: missing job ID")
+            logging.error("LMNT PROCESS: Invalid job: missing job ID")
             return
         
-        logging.info(f"Processing job {job_id}")
+        logging.info(f"LMNT PROCESS: Processing job {job_id} with data: {job}")
         
         # Set as current job
         self.current_print_job = job
+        logging.info(f"LMNT PROCESS: Set current_print_job to {job_id}")
         
         # Update job status to processing
+        logging.info(f"LMNT PROCESS: Updating job status to 'processing'")
         await self._update_job_status(job_id, 'processing', 'Starting job')
         
         # Download and decrypt GCode
+        logging.info(f"LMNT PROCESS: Starting download of GCode for job {job_id}")
         encrypted_filepath = await self._download_gcode(job)
         
         if not encrypted_filepath:
-            logging.error(f"Failed to download GCode for job {job_id}")
+            logging.error(f"LMNT PROCESS: Failed to download GCode for job {job_id}")
             await self._update_job_status(job_id, 'failed', 'Failed to download GCode')
             self.current_print_job = None
+            logging.info(f"LMNT PROCESS: Reset current_print_job to None due to download failure")
             return
         
+        logging.info(f"LMNT PROCESS: Successfully downloaded encrypted GCode to {encrypted_filepath}")
+        
         # Start printing
+        logging.info(f"LMNT PROCESS: Starting print for job {job_id}")
         success = await self._start_print(job, encrypted_filepath)
         
         if not success:
-            logging.error(f"Failed to start print for job {job_id}")
+            logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
             await self._update_job_status(job_id, 'failed', 'Failed to start print')
             self.current_print_job = None
+            logging.info(f"LMNT PROCESS: Reset current_print_job to None due to print start failure")
+        else:
+            logging.info(f"LMNT PROCESS: Successfully started print for job {job_id}")
+
     
     async def _check_printer_ready(self):
         """Check if printer is ready for a new print job"""
+        logging.info("LMNT READY: Checking if printer is ready for printing")
         try:
+            # Check print_stats to see if printer is currently printing
+            logging.info("LMNT READY: Querying print_stats object")
             result = await self.klippy_apis.query_objects({'objects': {'print_stats': None}})
-            if result.get('print_stats', {}).get('state', '') in ('printing', 'paused'):
-                logging.info("Printer is busy (printing or paused)")
+            print_state = result.get('print_stats', {}).get('state', '')
+            logging.info(f"LMNT READY: Current print_stats state: '{print_state}'")
+            
+            if print_state in ('printing', 'paused'):
+                logging.info("LMNT READY: Printer is busy (printing or paused)")
                 return False
             
             # Check if printer is connected and ready
+            logging.info("LMNT READY: Getting printer info")
             printer_info = await self.klippy_apis.get_printer_info()
-            if printer_info.get('state', '') != 'ready':
-                logging.info(f"Printer not ready: {printer_info.get('state', '')}")
+            printer_state = printer_info.get('state', '')
+            logging.info(f"LMNT READY: Printer state: '{printer_state}'")
+            
+            if printer_state != 'ready':
+                logging.info(f"LMNT READY: Printer not ready: '{printer_state}'")
                 return False
             
+            logging.info("LMNT READY: Printer is ready for printing")
             return True
         except Exception as e:
-            logging.error(f"Error checking printer readiness: {str(e)}")
+            logging.error(f"LMNT READY: Error checking printer readiness: {str(e)}")
+            import traceback
+            logging.error(f"LMNT READY: Exception traceback: {traceback.format_exc()}")
             return False
     
     async def _download_gcode(self, job):
@@ -349,43 +392,105 @@ class JobManager:
         job_id = job.get('id')
         gcode_url = job.get('gcode_url')
         
-        if not job_id or not gcode_url:
-            logging.error(f"Invalid job data: missing ID or GCode URL")
+        logging.info(f"LMNT DOWNLOAD: Starting download for job {job_id}")
+        logging.info(f"LMNT DOWNLOAD: GCode URL: {gcode_url}")
+        
+        if not job_id:
+            logging.error(f"LMNT DOWNLOAD: Invalid job data: missing ID")
             return None
+        
+        # Create directory for encrypted files if it doesn't exist
+        if not os.path.exists(self.integration.encrypted_path):
+            try:
+                os.makedirs(self.integration.encrypted_path)
+                logging.info(f"LMNT DOWNLOAD: Created directory for encrypted files: {self.integration.encrypted_path}")
+            except Exception as e:
+                logging.error(f"LMNT DOWNLOAD: Failed to create directory for encrypted files: {str(e)}")
+                return None
         
         # Create filename for encrypted GCode
         encrypted_filename = f"job_{job_id}.gcode.enc"
         encrypted_filepath = os.path.join(self.integration.encrypted_path, encrypted_filename)
         
         try:
-            # Download encrypted GCode
-            headers = {}
-            
-            # If the URL is from our API, add the printer token for authentication
-            if self.integration.marketplace_url in gcode_url:
-                headers["Authorization"] = f"Bearer {self.integration.auth_manager.printer_token}"
-            
-            logging.info(f"Downloading GCode from URL: {gcode_url}")
-            try:
-                async with self.http_client.get(gcode_url, headers=headers) as response:
+            # First try to get the job details with the file URL if we don't have it
+            if not gcode_url:
+                logging.info(f"LMNT DOWNLOAD: No direct gcode_url provided, fetching from job details")
+                # Get the job details from the API
+                job_details_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
+                
+                headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+                
+                async with self.http_client.get(job_details_url, headers=headers) as response:
                     if response.status == 200:
-                        # Save encrypted GCode to file
-                        with open(encrypted_filepath, 'wb') as f:
-                            f.write(await response.read())
+                        data = await response.json()
+                        gcode_url = data.get('gcode_file_url')
+                        logging.info(f"LMNT DOWNLOAD: Retrieved gcode_file_url from job details: {gcode_url}")
                         
-                        logging.info(f"Downloaded encrypted GCode for job {job_id}: {encrypted_filepath}")
-                        return encrypted_filepath
+                        if not gcode_url:
+                            logging.error("LMNT DOWNLOAD: No gcode_file_url found in job details")
+                            return None
                     else:
                         error_text = await response.text()
-                        logging.error(f"GCode download failed with status {response.status}: {error_text}")
-            except aiohttp.ClientConnectorError as e:
-                logging.error(f"Connection error downloading GCode from {gcode_url}: {str(e)}")
-            except aiohttp.ClientError as e:
-                logging.error(f"HTTP client error downloading GCode: {str(e)}")
-            except Exception as e:
-                logging.error(f"Unexpected error downloading GCode: {str(e)}")
+                        logging.error(f"LMNT DOWNLOAD: Failed to get job details: {error_text}")
+                        return None
+            
+            # If the URL is a GCS URL, we need to use a different approach
+            if "storage.googleapis.com" in gcode_url:
+                logging.info(f"LMNT DOWNLOAD: Detected GCS URL, using API proxy for download")
+                # Use the API to proxy the download instead of direct GCS access
+                download_url = f"{self.integration.marketplace_url}/api/download-gcode?print_job_id={job_id}"
+                logging.info(f"LMNT DOWNLOAD: Using proxy download URL: {download_url}")
+            else:
+                download_url = gcode_url
+                logging.info(f"LMNT DOWNLOAD: Using direct download URL: {download_url}")
+            
+            # Download encrypted GCode
+            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+            
+            start_time = time.time()
+            async with self.http_client.get(download_url, headers=headers) as response:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                logging.info(f"LMNT DOWNLOAD: Response received in {elapsed_ms}ms with status: {response.status}")
+                
+                if response.status == 200:
+                    # Save encrypted GCode to file
+                    content = await response.read()
+                    content_size = len(content)
+                    logging.info(f"LMNT DOWNLOAD: Downloaded {content_size} bytes of encrypted GCode")
+                    
+                    with open(encrypted_filepath, 'wb') as f:
+                        f.write(content)
+                    
+                    logging.info(f"LMNT DOWNLOAD: Saved encrypted GCode to {encrypted_filepath}")
+                    return encrypted_filepath
+                else:
+                    error_text = await response.text()
+                    logging.error(f"LMNT DOWNLOAD: GCode download failed with status {response.status}: {error_text}")
+                    
+                    # If direct download failed, try using the API proxy
+                    if download_url != f"{self.integration.marketplace_url}/api/download-gcode?print_job_id={job_id}":
+                        logging.info(f"LMNT DOWNLOAD: Direct download failed, trying API proxy")
+                        proxy_url = f"{self.integration.marketplace_url}/api/download-gcode?print_job_id={job_id}"
+                        
+                        async with self.http_client.get(proxy_url, headers=headers) as proxy_response:
+                            if proxy_response.status == 200:
+                                content = await proxy_response.read()
+                                content_size = len(content)
+                                logging.info(f"LMNT DOWNLOAD: Downloaded {content_size} bytes via API proxy")
+                                
+                                with open(encrypted_filepath, 'wb') as f:
+                                    f.write(content)
+                                
+                                logging.info(f"LMNT DOWNLOAD: Saved encrypted GCode to {encrypted_filepath}")
+                                return encrypted_filepath
+                            else:
+                                proxy_error = await proxy_response.text()
+                                logging.error(f"LMNT DOWNLOAD: API proxy download failed: {proxy_error}")
         except Exception as e:
-            logging.error(f"Error downloading GCode for job {job_id}: {str(e)}")
+            logging.error(f"LMNT DOWNLOAD: Error downloading GCode for job {job_id}: {str(e)}")
+            import traceback
+            logging.error(f"LMNT DOWNLOAD: Exception traceback: {traceback.format_exc()}")
         
         return None
     
@@ -403,30 +508,70 @@ class JobManager:
         job_id = job.get('id')
         
         if not job_id or not encrypted_filepath:
-            logging.error("Cannot start print: Missing job ID or encrypted file path")
+            logging.error("LMNT PRINT: Cannot start print: Missing job ID or encrypted file path")
             return False
+        
+        logging.info(f"LMNT PRINT: Starting print for job {job_id}")
         
         try:
             # Check if printer is ready
             is_ready = await self._check_printer_ready()
             if not is_ready:
-                logging.error(f"Cannot start print for job {job_id}: Printer not ready")
+                logging.error(f"LMNT PRINT: Cannot start print for job {job_id}: Printer not ready")
                 return False
+            
+            # Get the DEK for decryption
+            logging.info(f"LMNT PRINT: Getting DEK for job {job_id}")
+            gcode_dek = await self._get_gcode_dek(job_id)
+            
+            if not gcode_dek:
+                logging.error(f"LMNT PRINT: Failed to get DEK for job {job_id}")
+                return False
+                
+            logging.info(f"LMNT PRINT: Successfully retrieved DEK for job {job_id}")
             
             # Home the printer if needed
             try:
+                logging.info(f"LMNT PRINT: Homing printer before starting print")
                 await self.klippy_apis.run_gcode("G28")
-                logging.info("Homed printer before starting print")
+                logging.info("LMNT PRINT: Successfully homed printer")
             except Exception as e:
-                logging.error(f"Error homing printer: {str(e)}")
+                logging.error(f"LMNT PRINT: Error homing printer: {str(e)}")
+                return False
+            
+            # Read the encrypted file
+            try:
+                logging.info(f"LMNT PRINT: Reading encrypted file: {encrypted_filepath}")
+                with open(encrypted_filepath, 'rb') as f:
+                    encrypted_data = f.read()
+                logging.info(f"LMNT PRINT: Read {len(encrypted_data)} bytes of encrypted data")
+            except Exception as e:
+                logging.error(f"LMNT PRINT: Error reading encrypted file: {str(e)}")
+                return False
+            
+            # Decrypt the data
+            try:
+                logging.info(f"LMNT PRINT: Decrypting G-code data")
+                decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(encrypted_data, job_id)
+                
+                if not decrypted_gcode:
+                    logging.error(f"LMNT PRINT: Failed to decrypt G-code for job {job_id}")
+                    return False
+                    
+                logging.info(f"LMNT PRINT: Successfully decrypted {len(decrypted_gcode)} bytes of G-code")
+            except Exception as e:
+                logging.error(f"LMNT PRINT: Error decrypting G-code: {str(e)}")
+                import traceback
+                logging.error(f"LMNT PRINT: Exception traceback: {traceback.format_exc()}")
                 return False
             
             # Stream decrypted GCode to Klipper
+            logging.info(f"LMNT PRINT: Streaming decrypted G-code to Klipper")
             metadata = await self.integration.gcode_manager.stream_decrypted_gcode(
                 encrypted_filepath, job_id)
             
             if not metadata:
-                logging.error(f"Failed to stream GCode for job {job_id}")
+                logging.error(f"LMNT PRINT: Failed to stream G-code for job {job_id}")
                 return False
             
             # Save metadata
@@ -436,15 +581,78 @@ class JobManager:
             await self._update_job_status(job_id, 'printing', 'Print started')
             
             # Start monitoring print progress
+            logging.info(f"LMNT PRINT: Starting print progress monitoring for job {job_id}")
             asyncio.create_task(self._monitor_print_progress(job))
             
-            logging.info(f"Started print for job {job_id}")
+            logging.info(f"LMNT PRINT: Successfully started print for job {job_id}")
             return True
             
         except Exception as e:
-            logging.error(f"Error starting print for job {job_id}: {str(e)}")
+            logging.error(f"LMNT PRINT: Error starting print for job {job_id}: {str(e)}")
+            import traceback
+            logging.error(f"LMNT PRINT: Exception traceback: {traceback.format_exc()}")
             return False
     
+    async def _get_gcode_dek(self, job_id):
+        """
+        Get the encrypted GCode DEK for a job from the marketplace API
+        
+        Args:
+            job_id (str): Job ID to get DEK for
+            
+        Returns:
+            str: Base64-encoded DEK if successful
+            None: If DEK could not be obtained
+        """
+        if not job_id:
+            logging.error("LMNT DEK: Cannot get DEK - missing job ID")
+            return None
+            
+        # Get the API endpoint URL - use query parameter, not path parameter
+        api_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
+        logging.info(f"LMNT DEK: Getting DEK from: {api_url}")
+        
+        # Get the printer token for authentication
+        printer_token = self.integration.auth_manager.printer_token
+        if not printer_token:
+            logging.error("LMNT DEK: Cannot get DEK - no printer token available")
+            return None
+            
+        # Set up the request headers with authentication
+        headers = {
+            "Authorization": f"Bearer {printer_token}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            # Make the API request
+            start_time = time.time()
+            async with self.http_client.get(api_url, headers=headers) as response:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                logging.info(f"LMNT DEK: Response received in {elapsed_ms}ms with status: {response.status}")
+                
+                if response.status == 200:
+                    # Parse the response JSON
+                    data = await response.json()
+                    logging.info(f"LMNT DEK: Received job details for job {job_id}")
+                    
+                    # Check if the response contains the DEK
+                    gcode_dek = data.get('gcode_dek')
+                    if gcode_dek:
+                        logging.info(f"LMNT DEK: Successfully retrieved DEK for job {job_id}")
+                        return gcode_dek
+                    else:
+                        logging.error(f"LMNT DEK: Response missing gcode_dek field for job {job_id}")
+                else:
+                    error_text = await response.text()
+                    logging.error(f"LMNT DEK: Failed to get DEK with status {response.status}: {error_text}")
+        except Exception as e:
+            logging.error(f"LMNT DEK: Error getting DEK for job {job_id}: {str(e)}")
+            import traceback
+            logging.error(f"LMNT DEK: Exception traceback: {traceback.format_exc()}")
+        
+        return None
+        
     async def _update_job_status(self, job_id, status, message=None):
         """
         Update job status in the marketplace
