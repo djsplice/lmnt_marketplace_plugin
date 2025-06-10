@@ -66,6 +66,12 @@ class LmntMarketplacePlugin:
         """Called when Klippy reports shutdown"""
         self.klippy_apis = None
         await self.integration.handle_klippy_shutdown()
+        
+    async def close(self):
+        """Called when Moonraker is shutting down"""
+        logging.info("LMNT Marketplace Plugin shutting down")
+        if hasattr(self, 'integration'):
+            await self.integration.close()
     
     def _register_legacy_endpoints(self):
         """Register legacy endpoints for backward compatibility"""

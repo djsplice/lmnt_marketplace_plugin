@@ -9,6 +9,7 @@ coordinating authentication, crypto operations, GCode handling, and job manageme
 import os
 import logging
 import asyncio
+import aiohttp
 from datetime import datetime, timedelta
 
 # Import submodules
@@ -79,11 +80,15 @@ class LmntMarketplaceIntegration:
         """
         self.klippy_apis = klippy_apis
         
-        # Initialize managers with Klippy APIs
-        await self.auth_manager.initialize(klippy_apis, None)
-        await self.crypto_manager.initialize(klippy_apis, None)
-        await self.gcode_manager.initialize(klippy_apis, None)
-        await self.job_manager.initialize(klippy_apis, None)
+        # Create HTTP client for API calls
+        self.http_client = aiohttp.ClientSession()
+        logging.info("Created HTTP client for API calls")
+        
+        # Initialize managers with Klippy APIs and HTTP client
+        await self.auth_manager.initialize(klippy_apis, self.http_client)
+        await self.crypto_manager.initialize(klippy_apis, self.http_client)
+        await self.gcode_manager.initialize(klippy_apis, self.http_client)
+        await self.job_manager.initialize(klippy_apis, self.http_client)
         
         # Start background tasks
         self.server.register_event_loop_callback(self._background_tasks)
@@ -101,6 +106,7 @@ class LmntMarketplaceIntegration:
         """
         Handle Klippy shutdown event
         """
+        logging.info("LMNT Marketplace: Handling Klippy shutdown")
         self.klippy_apis = None
         
         # Notify managers
@@ -108,3 +114,12 @@ class LmntMarketplaceIntegration:
         await self.crypto_manager.handle_klippy_shutdown()
         await self.gcode_manager.handle_klippy_shutdown()
         await self.job_manager.handle_klippy_shutdown()
+    
+    async def close(self):
+        """
+        Close the integration and release resources
+        """
+        if hasattr(self, 'http_client') and self.http_client is not None:
+            await self.http_client.close()
+            logging.info("Closed HTTP client")
+        logging.info("LMNT Marketplace Integration closed")
