@@ -108,7 +108,11 @@ class LmntMarketplacePlugin:
         try:
             # Extract login credentials from the request body
             try:
-                request_data = jsonw.loads(web_request.request.body)
+                # Get the raw body data and parse it as JSON
+                body = web_request.get_body_argument('', default=None)
+                if body is None:
+                    body = web_request.body
+                request_data = jsonw.loads(body)
             except Exception:
                 logging.exception("Error parsing JSON request")
                 raise self.server.error("Invalid JSON in request body", 400)
@@ -131,7 +135,11 @@ class LmntMarketplacePlugin:
         try:
             # Extract registration data from the request body
             try:
-                request_data = jsonw.loads(web_request.request.body)
+                # Get the raw body data and parse it as JSON
+                body = web_request.get_body_argument('', default=None)
+                if body is None:
+                    body = web_request.body
+                request_data = jsonw.loads(body)
             except Exception:
                 logging.exception("Error parsing JSON request")
                 raise self.server.error("Invalid JSON in request body", 400)
