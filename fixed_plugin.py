@@ -3,14 +3,11 @@
 # This is a thin wrapper that loads the modular LMNT Marketplace integration
 
 import logging
+import asyncio
 import os
 import sys
-import traceback
-
+import importlib
 from moonraker.common import RequestType
-
-# Import will be done in __init__ to avoid circular imports
-# We'll import LmntMarketplaceIntegration dynamically
 
 class LmntMarketplacePlugin:
     """
@@ -28,6 +25,7 @@ class LmntMarketplacePlugin:
         self.klippy_apis = None
         logging.info("Initializing LMNT Marketplace Plugin (modular version)")
         
+        # Import the integration module safely
         try:
             # Get the directory of this file
             current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -37,29 +35,27 @@ class LmntMarketplacePlugin:
             if marketplace_dir not in sys.path:
                 sys.path.insert(0, marketplace_dir)
             
-            # Import the integration class directly
+            # Import the integration class directly from the module
             # This avoids the circular import issue
             from lmnt_marketplace.integration import LmntMarketplaceIntegration
             
             # Initialize the modular integration
             self.integration = LmntMarketplaceIntegration(config, self.server)
             
-            logging.info(f"Successfully imported LmntMarketplaceIntegration from {marketplace_dir}")
+            # Register server components
+            self.server.register_event_handler(
+                "server:klippy_ready", self._handle_klippy_ready)
+            self.server.register_event_handler(
+                "server:klippy_shutdown", self._handle_klippy_shutdown)
+            
+            # Register legacy endpoints for backward compatibility
+            self._register_legacy_endpoints()
+            
+            logging.info("LMNT Marketplace Plugin initialized successfully")
         except Exception as e:
-            logging.error(f"Error importing LmntMarketplaceIntegration: {str(e)}")
+            logging.error(f"Error initializing LMNT Marketplace Plugin: {str(e)}")
             logging.error(f"Traceback: {traceback.format_exc()}")
             raise
-        
-        # Register server components
-        self.server.register_event_handler(
-            "server:klippy_ready", self._handle_klippy_ready)
-        self.server.register_event_handler(
-            "server:klippy_shutdown", self._handle_klippy_shutdown)
-        
-        # Register legacy endpoints for backward compatibility
-        self._register_legacy_endpoints()
-        
-        logging.info("LMNT Marketplace Plugin initialized successfully")
     
     async def _handle_klippy_ready(self):
         """Called when Klippy reports ready"""
