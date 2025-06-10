@@ -173,6 +173,13 @@ class LmntMarketplacePlugin:
             manufacturer = args.get('manufacturer')
             model = args.get('model')
             
+            # Check for Authorization header if user_token is not in body
+            if not user_token:
+                auth_header = web_request.get_header('Authorization')
+                if auth_header and auth_header.startswith('Bearer '):
+                    user_token = auth_header[7:]  # Remove 'Bearer ' prefix
+                    logging.info("Using token from Authorization header")
+            
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
             
