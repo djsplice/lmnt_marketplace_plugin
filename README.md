@@ -36,6 +36,25 @@ For detailed installation instructions, see [Installation Guide](docs/installati
 - **LMNT Marketplace integration with secure printer token management**
 - **Printer-specific encryption key (PSEK) handling for secure G-code decryption**
 
+## Configuration
+
+The plugin can be configured in the `moonraker.conf` file. Here's an example configuration:
+
+```ini
+[lmnt_marketplace]
+check_interval: 60
+debug_mode: False
+marketplace_url: https://api.lmnt.market
+cws_url: https://cws.lmnt.market
+```
+
+### Configuration Options
+
+- `check_interval`: How often (in seconds) to check for new jobs (default: 60)
+- `debug_mode`: Enable verbose logging including sensitive information like tokens (default: False)
+- `marketplace_url`: Override the default marketplace API URL (default: https://api.lmnt.market)
+- `cws_url`: Override the default CWS API URL (default: https://cws.lmnt.market)
+
 **Note:** The system will automatically attempt to open G-code files as encrypted first; if that fails, it falls back to standard plaintext mode. This ensures a seamless experience regardless of file type.
 
 ## Flow
@@ -206,7 +225,75 @@ Response:
 ```
 
 ### Printer Token Refresh
-The system uses a dedicated endpoint for refreshing printer tokens:
+
+Endpoint to refresh the printer token with the LMNT Marketplace.
+
+```
+POST /machine/lmnt_marketplace/refresh_token
+```
+
+No request body is needed - the plugin uses the stored printer token.
+
+Response:
+```json
+{
+  "status": "success",
+  "printer_id": "printer-uuid",
+  "expiry": "2025-07-10T06:44:30.708000+00:00"
+}
+```
+
+### Job Status Check
+
+Endpoint to check the current job status.
+
+```
+POST /machine/lmnt_marketplace/check_jobs
+```
+
+No request body is needed.
+
+Response:
+```json
+{
+  "status": "success",
+  "message": "Job status retrieved",
+  "job_status": {
+    "current_job": null,
+    "queue_length": 0,
+    "job_started": false,
+    "last_check": "2025-06-09T23:41:44.449775"
+  }
+}
+```
+
+### Status Endpoint
+
+Endpoint to get the current status of the LMNT Marketplace integration.
+
+```
+GET /machine/lmnt_marketplace/status
+```
+
+Response:
+```json
+{
+  "auth": {
+    "authenticated": true,
+    "printer_id": "printer-uuid",
+    "token_expiry": "2025-07-10T06:40:50.066000+00:00"
+  },
+  "jobs": {
+    "current_job": null,
+    "queue_length": 0,
+    "job_started": false,
+    "last_check": "2025-06-09T23:41:12.569082"
+  },
+  "version": "1.0.0"
+}
+```
+
+### Legacy Endpoints
 
 ```
 POST /api/refresh-printer-token

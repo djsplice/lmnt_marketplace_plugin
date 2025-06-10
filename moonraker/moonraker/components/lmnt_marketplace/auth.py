@@ -14,6 +14,7 @@ import asyncio
 import aiohttp
 import time
 import base64
+import re
 from datetime import datetime, timedelta
 import jwt
 
@@ -40,6 +41,34 @@ class AuthManager:
         
         # Load existing printer token if available
         self.load_printer_token()
+        
+    def _redact_sensitive_data(self, data, is_json=False):
+        """Redact sensitive information from logs when debug mode is disabled"""
+        if self.integration.debug_mode:
+            return data
+            
+        # If it's JSON data, convert to string for processing
+        if is_json and isinstance(data, dict):
+            data_str = json.dumps(data)
+        else:
+            data_str = str(data)
+            
+        # Redact JWT tokens
+        jwt_pattern = r'eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+'  
+        redacted_str = re.sub(jwt_pattern, '[REDACTED_TOKEN]', data_str)
+        
+        # Redact passwords
+        if '"password"' in redacted_str:
+            redacted_str = re.sub(r'"password"\s*:\s*"[^"]*"', '"password":"[REDACTED]"', redacted_str)
+            
+        # Convert back to dict if it was JSON
+        if is_json and isinstance(data, dict):
+            try:
+                return json.loads(redacted_str)
+            except json.JSONDecodeError:
+                return {"redacted": "[JSON with redacted values]"}
+        
+        return redacted_str
     
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
@@ -121,14 +150,18 @@ class AuthManager:
                     'expiry': expiry.isoformat() if expiry else None
                 }, f)
             
-            # Update current token and expiry
+            # Update in-memory token
             self.printer_token = token
             self.token_expiry = expiry
             
             # Extract printer_id from token
             self.printer_id = self._get_printer_id_from_token()
             
-            logging.info(f"Saved printer token for printer ID: {self.printer_id}")
+            # Log with redacted token if not in debug mode
+            if self.integration.debug_mode:
+                logging.info(f"Saved printer token: {token} for printer ID: {self.printer_id}")
+            else:
+                logging.info(f"Saved printer token for printer ID: {self.printer_id}")
             return True
         except IOError as e:
             logging.error(f"Error saving printer token: {str(e)}")
@@ -185,10 +218,16 @@ class AuthManager:
         try:
             headers = {"Authorization": f"Bearer {self.printer_token}"}
             
+            # Redact sensitive information in headers
+            redacted_headers = self._redact_sensitive_data(headers)
+            logging.info(f"Sending token refresh request with headers: {redacted_headers}")
+            
             async with self.http_client.post(refresh_url, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
-                    logging.info(f"Token refresh response: {data}")
+                    # Redact sensitive information in response
+                    redacted_data = self._redact_sensitive_data(data, is_json=True)
+                    logging.info(f"Token refresh response: {redacted_data}")
                     # Try both field names - some APIs use 'token', others use 'printer_token'
                     new_token = data.get('printer_token') or data.get('token')
                     
@@ -245,9 +284,14 @@ class AuthManager:
             login_url = f"{self.integration.cws_url}/auth/login"
             logging.info(f"Attempting login with URL: {login_url}")
             
+            # Create payload but redact for logging
+            payload = {"email": username, "password": password}
+            redacted_payload = self._redact_sensitive_data(payload, is_json=True)
+            logging.info(f"Login request payload: {redacted_payload}")
+            
             async with self.http_client.post(
                 login_url, 
-                json={"email": username, "password": password}
+                json=payload
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
@@ -255,6 +299,10 @@ class AuthManager:
                     raise self.integration.server.error(f"Login failed: {error_text}", response.status)
                 
                 data = await response.json()
+                # Redact sensitive information in response for logging
+                redacted_data = self._redact_sensitive_data(data, is_json=True)
+                logging.info(f"Login response: {redacted_data}")
+                
                 token = data.get('token')
                 
                 if not token:
@@ -263,7 +311,8 @@ class AuthManager:
                 # Store user token temporarily for printer registration
                 self.user_token = token
                 
-                return {"status": "success", "token": token}
+                # Return success but redact token in response to client
+                return {"status": "success", "token": "[TOKEN_RECEIVED]"} if not self.integration.debug_mode else {"status": "success", "token": token}
         except aiohttp.ClientError as e:
             logging.error(f"HTTP error during user login: {str(e)}")
             raise self.integration.server.error(f"Connection error: {str(e)}", 500)
@@ -327,7 +376,9 @@ class AuthManager:
             }
             logging.info(f"Registering printer with payload: {payload}")
             
-            logging.info(f"Sending registration request with headers: {headers}")
+            # Redact sensitive information in headers
+            redacted_headers = self._redact_sensitive_data(headers)            
+            logging.info(f"Sending registration request with headers: {redacted_headers}")
             try:
                 async with self.http_client.post(
                     register_url,
@@ -336,7 +387,10 @@ class AuthManager:
                 ) as response:
                     response_text = await response.text()
                     logging.info(f"Registration response status: {response.status}")
-                    logging.info(f"Registration response body: {response_text}")
+                    
+                    # Redact sensitive information in response
+                    redacted_response = self._redact_sensitive_data(response_text)
+                    logging.info(f"Registration response body: {redacted_response}")
                     
                     if response.status != 200 and response.status != 201:
                         logging.error(f"Printer registration failed: {response_text}")

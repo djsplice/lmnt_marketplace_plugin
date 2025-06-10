@@ -51,9 +51,19 @@ class LmntMarketplaceIntegration:
         self.marketplace_url = self.config.get('marketplace_url', "https://api.lmnt.market")
         self.cws_url = self.config.get('cws_url', "https://cws.lmnt.market")
         
+        # Debug mode for verbose logging (default: False)
+        self.debug_mode = self.config.getboolean('debug_mode', False)
+        
         # Log the configured endpoints
         logging.info(f"LMNT Marketplace API URL: {self.marketplace_url}")
         logging.info(f"LMNT CWS URL: {self.cws_url}")
+        logging.info(f"Debug mode: {self.debug_mode}")
+        
+        # Configure logging level
+        if self.debug_mode:
+            logging.info("Debug mode enabled - sensitive information may be logged")
+        else:
+            logging.info("Debug mode disabled - sensitive information will be redacted")
         
         # Get event loop for scheduling tasks
         self.eventloop = self.server.get_event_loop()
