@@ -273,12 +273,15 @@ class AuthManager:
             logging.error(f"Error during user login handler: {str(e)}")
             raise web_request.error(f"Login error: {str(e)}", 500)
     
-    async def register_printer(self, user_token, printer_name):
-        """Register printer with the LMNT Marketplace
+    async def register_printer(self, user_token, printer_name, manufacturer=None, model=None):
+        """
+        Register printer with the LMNT Marketplace
         
         Args:
             user_token: User's JWT token
             printer_name: Name for the printer
+            manufacturer: Printer manufacturer (optional)
+            model: Printer model (optional)
             
         Returns:
             dict: Registration response
@@ -298,10 +301,18 @@ class AuthManager:
             
             headers = {"Authorization": f"Bearer {self.user_token}"}
             
+            # Build payload with all required fields
+            payload = {
+                "printer_name": printer_name,
+                "manufacturer": manufacturer or "LMNT Printer",
+                "model": model or "Klipper"
+            }
+            logging.info(f"Registering printer with payload: {payload}")
+            
             async with self.http_client.post(
                 register_url,
                 headers=headers,
-                json={"name": printer_name}
+                json=payload
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()

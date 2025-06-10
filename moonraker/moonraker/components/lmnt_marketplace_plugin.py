@@ -170,12 +170,18 @@ class LmntMarketplacePlugin:
             
             user_token = args.get('user_token')
             printer_name = args.get('printer_name')
+            manufacturer = args.get('manufacturer')
+            model = args.get('model')
             
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
             
+            # Log registration request details
+            logging.info(f"Registering printer: {printer_name}, Manufacturer: {manufacturer}, Model: {model}")
+            
             # Delegate to the auth manager
-            result = await self.integration.auth_manager.register_printer(user_token, printer_name)
+            result = await self.integration.auth_manager.register_printer(
+                user_token, printer_name, manufacturer, model)
             return result
         except Exception as e:
             logging.error(f"Error during printer registration: {str(e)}")
