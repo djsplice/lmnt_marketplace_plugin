@@ -61,6 +61,11 @@ class LmntMarketplacePlugin:
         
         # Initialize the integration with Klippy APIs
         await self.integration.initialize(self.klippy_apis)
+        
+        # Explicitly start job polling
+        logging.info("LMNT Plugin: Explicitly starting job polling after Klippy ready")
+        self.integration.job_manager.setup_job_polling()
+        logging.info("LMNT Plugin: Job polling setup completed")
     
     async def _handle_klippy_shutdown(self):
         """Called when Klippy reports shutdown"""
