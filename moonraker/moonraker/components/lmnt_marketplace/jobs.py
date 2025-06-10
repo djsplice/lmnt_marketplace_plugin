@@ -198,8 +198,21 @@ class JobManager:
                                 print_job_id = job.get('print_job_id')
                                 if print_job_id:
                                     logging.info(f"LMNT JOB POLLING: Processing job {print_job_id}")
-                                    # TODO: Add job to queue for processing
-                                    # self.add_job_to_queue(print_job_id)
+                                    # Transform the job format to match what _process_pending_jobs expects
+                                    processed_job = {
+                                        'id': print_job_id,
+                                        'purchase_id': job.get('purchase_id'),
+                                        'status': job.get('status'),
+                                        'created_at': job.get('created_at'),
+                                        # Use the gcode_url from the API response
+                                        'gcode_url': job.get('gcode_url')
+                                    }
+                                    logging.info(f"LMNT JOB POLLING: Job data: {processed_job}")
+                                    if not processed_job['gcode_url']:
+                                        logging.error(f"LMNT JOB POLLING: Missing gcode_url for job {print_job_id}")
+                                        continue
+                                    # Add job to queue for processing
+                                    await self._process_pending_jobs([processed_job])
                         else:
                             logging.info("LMNT JOB POLLING: No pending jobs found")
                         
@@ -346,19 +359,31 @@ class JobManager:
         
         try:
             # Download encrypted GCode
-            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+            headers = {}
             
-            async with self.http_client.get(gcode_url, headers=headers) as response:
-                if response.status == 200:
-                    # Save encrypted GCode to file
-                    with open(encrypted_filepath, 'wb') as f:
-                        f.write(await response.read())
-                    
-                    logging.info(f"Downloaded encrypted GCode for job {job_id}: {encrypted_filepath}")
-                    return encrypted_filepath
-                else:
-                    error_text = await response.text()
-                    logging.error(f"GCode download failed with status {response.status}: {error_text}")
+            # If the URL is from our API, add the printer token for authentication
+            if self.integration.marketplace_url in gcode_url:
+                headers["Authorization"] = f"Bearer {self.integration.auth_manager.printer_token}"
+            
+            logging.info(f"Downloading GCode from URL: {gcode_url}")
+            try:
+                async with self.http_client.get(gcode_url, headers=headers) as response:
+                    if response.status == 200:
+                        # Save encrypted GCode to file
+                        with open(encrypted_filepath, 'wb') as f:
+                            f.write(await response.read())
+                        
+                        logging.info(f"Downloaded encrypted GCode for job {job_id}: {encrypted_filepath}")
+                        return encrypted_filepath
+                    else:
+                        error_text = await response.text()
+                        logging.error(f"GCode download failed with status {response.status}: {error_text}")
+            except aiohttp.ClientConnectorError as e:
+                logging.error(f"Connection error downloading GCode from {gcode_url}: {str(e)}")
+            except aiohttp.ClientError as e:
+                logging.error(f"HTTP client error downloading GCode: {str(e)}")
+            except Exception as e:
+                logging.error(f"Unexpected error downloading GCode: {str(e)}")
         except Exception as e:
             logging.error(f"Error downloading GCode for job {job_id}: {str(e)}")
         
