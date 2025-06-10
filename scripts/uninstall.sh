@@ -29,15 +29,15 @@ echo "Removing plugin directory..."
 rm -rf "${PLUGIN_DIR}"
 
 # Remove Klipper extensions if they exist
-if [ -f "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py.bak" ]; then
-    echo "Restoring original Klipper virtual_sdcard.py..."
-    mv "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py.bak" "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py"
-fi
+#if [ -f "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py.bak" ]; then
+#    echo "Restoring original Klipper virtual_sdcard.py..."
+#    mv "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py.bak" "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py"
+#fi
 
-if [ -f "${KLIPPER_DIR}/klippy/extras/print_stats.py.bak" ]; then
-    echo "Restoring original Klipper print_stats.py..."
-    mv "${KLIPPER_DIR}/klippy/extras/print_stats.py.bak" "${KLIPPER_DIR}/klippy/extras/print_stats.py"
-fi
+#if [ -f "${KLIPPER_DIR}/klippy/extras/print_stats.py.bak" ]; then
+#    echo "Restoring original Klipper print_stats.py..."
+#    mv "${KLIPPER_DIR}/klippy/extras/print_stats.py.bak" "${KLIPPER_DIR}/klippy/extras/print_stats.py"
+#fi
 
 # Update moonraker.conf
 echo "Updating moonraker.conf..."
@@ -60,4 +60,4 @@ fi
 echo "Uninstallation complete!"
 echo "Please restart Moonraker and Klipper to apply changes:"
 echo "sudo systemctl restart moonraker"
-echo "sudo systemctl restart klipper"
+#echo "sudo systemctl restart klipper"

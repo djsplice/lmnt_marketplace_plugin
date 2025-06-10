@@ -45,11 +45,11 @@ ln -sf "${PLUGIN_DIR}/component/hedera_slicer.py" "${COMPONENT_DIR}/hedera_slice
 ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
 
 # Copy Klipper macros if they exist
-if [ -d "${REPO_DIR}/klipper/extras" ]; then
-    echo "Copying Klipper extensions..."
-    mkdir -p "${KLIPPER_DIR}/klippy/extras"
-    cp "${REPO_DIR}/klipper/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
-fi
+#if [ -d "${REPO_DIR}/klipper/extras" ]; then
+#    echo "Copying Klipper extensions..."
+#    mkdir -p "${KLIPPER_DIR}/klippy/extras"
+#    cp "${REPO_DIR}/klipper/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
+#fi
 
 # Update moonraker.conf
 echo "Updating moonraker.conf..."
@@ -74,4 +74,4 @@ fi
 echo "Installation complete!"
 echo "Please restart Moonraker and Klipper to activate the plugin:"
 echo "sudo systemctl restart moonraker"
-echo "sudo systemctl restart klipper"
+#echo "sudo systemctl restart klipper"
