@@ -493,7 +493,8 @@ class JobManager:
             if "storage.googleapis.com" in gcode_url:
                 logging.info(f"LMNT DOWNLOAD: Detected GCS URL, using API proxy for download")
                 # Use the API to proxy the download instead of direct GCS access
-                download_url = f"{self.integration.marketplace_url}/api/download-gcode?print_job_id={job_id}"
+                # The correct endpoint is /api/get-print-job-gcode with print_job_id parameter
+                download_url = f"{self.integration.marketplace_url}/api/get-print-job-gcode?print_job_id={job_id}"
                 logging.info(f"LMNT DOWNLOAD: Using proxy download URL: {download_url}")
             else:
                 download_url = gcode_url
@@ -523,9 +524,9 @@ class JobManager:
                     logging.error(f"LMNT DOWNLOAD: GCode download failed with status {response.status}: {error_text}")
                     
                     # If direct download failed, try using the API proxy
-                    if download_url != f"{self.integration.marketplace_url}/api/download-gcode?print_job_id={job_id}":
+                    if download_url != f"{self.integration.marketplace_url}/api/get-print-job-gcode?print_job_id={job_id}":
                         logging.info(f"LMNT DOWNLOAD: Direct download failed, trying API proxy")
-                        proxy_url = f"{self.integration.marketplace_url}/api/download-gcode?print_job_id={job_id}"
+                        proxy_url = f"{self.integration.marketplace_url}/api/get-print-job-gcode?print_job_id={job_id}"
                         
                         async with self.http_client.get(proxy_url, headers=headers) as proxy_response:
                             if proxy_response.status == 200:
