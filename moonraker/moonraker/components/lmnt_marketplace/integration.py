@@ -119,7 +119,13 @@ class LmntMarketplaceIntegration:
         """
         Close the integration and release resources
         """
+        # Close all managers first
+        if hasattr(self, 'auth_manager'):
+            await self.auth_manager.close()
+            
+        # Close HTTP client last
         if hasattr(self, 'http_client') and self.http_client is not None:
             await self.http_client.close()
             logging.info("Closed HTTP client")
+            
         logging.info("LMNT Marketplace Integration closed")

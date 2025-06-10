@@ -32,6 +32,11 @@ class AuthManager:
         self.token_expiry = None
         self.user_token = None  # Temporary storage for user JWT during registration
         self.printer_id = None
+        self.klippy_apis = None
+        
+        # Create HTTP client for API calls
+        self.http_client = aiohttp.ClientSession()
+        logging.info("Created HTTP client for AuthManager")
         
         # Load existing printer token if available
         self.load_printer_token()
@@ -39,7 +44,11 @@ class AuthManager:
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
         self.klippy_apis = klippy_apis
-        self.http_client = http_client
+        
+        # Use the provided HTTP client if not already created
+        if http_client is not None and not hasattr(self, 'http_client'):
+            self.http_client = http_client
+            logging.info("Using provided HTTP client for AuthManager")
     
     def register_endpoints(self, register_endpoint):
         """Register HTTP endpoints for authentication"""
@@ -409,12 +418,22 @@ class AuthManager:
         Returns:
             dict: Authentication status information
         """
-        status = {
+        return {
             "authenticated": self.printer_token is not None,
             "printer_id": self.printer_id,
             "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None
         }
-        return status
+        
+    async def handle_klippy_shutdown(self):
+        """Handle Klippy shutdown"""
+        self.klippy_apis = None
+        
+    async def close(self):
+        """Close the manager and release resources"""
+        if hasattr(self, 'http_client') and self.http_client is not None:
+            await self.http_client.close()
+            logging.info("Closed HTTP client for AuthManager")
+            self.http_client = None
     
     def validate_printer_token(self, token):
         """
