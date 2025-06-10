@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.4] - 2025-06-09
+### Added
+- Advanced component tests for comprehensive local testing of GCode and Job managers
+- Extension methods for GCodeManager to support memory-efficient GCode streaming, metadata extraction, and thumbnail handling
+- Extension methods for JobManager to support job queue management and status updates
+- Dynamic test extension system for patching manager instances with test-specific methods
+- Memory usage monitoring in tests to ensure efficient GCode processing
+
+### Improved
+- Enhanced error handling in GCode processing with proper exception propagation
+- Implemented secure in-memory decryption without writing decrypted content to disk
+- Added test mocks for crypto_manager and klippy_apis to enable local testing without external dependencies
+
 ## [1.0.3] - 2025-06-08
 ### Added
 - LMNT Marketplace integration for secure printer token management
