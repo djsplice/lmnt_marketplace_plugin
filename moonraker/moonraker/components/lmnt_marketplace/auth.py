@@ -115,7 +115,10 @@ class AuthManager:
     
     def load_printer_token(self):
         """Load saved printer token from secure storage"""
+        logging.info("LMNT AUTH: Loading printer token from storage")
         token_file = os.path.join(self.integration.tokens_path, "printer_token.json")
+        logging.info(f"LMNT AUTH: Looking for token file at {token_file}")
+        
         if os.path.exists(token_file):
             try:
                 with open(token_file, 'r') as f:
@@ -128,12 +131,20 @@ class AuthManager:
                     # Extract printer_id from token if available
                     if self.printer_token:
                         self.printer_id = self._get_printer_id_from_token()
-                        logging.info(f"Loaded printer token for printer ID: {self.printer_id}")
-                        return True
+                        if self.printer_id:
+                            logging.info(f"LMNT AUTH: Loaded printer token for printer ID: {self.printer_id}")
+                            return True
+                        else:
+                            logging.error("LMNT AUTH: Token loaded but no printer ID found in token")
+                    else:
+                        logging.error("LMNT AUTH: Token file exists but contains no token")
             except (json.JSONDecodeError, IOError) as e:
-                logging.error(f"Error loading printer token: {str(e)}")
+                logging.error(f"LMNT AUTH: Error loading printer token: {str(e)}")
+        else:
+            logging.info(f"LMNT AUTH: No token file found at {token_file}")
         
-        logging.info("No valid printer token found")
+        logging.info("LMNT AUTH: No valid printer token found. Printer needs to be registered.")
+        logging.info("LMNT AUTH: Use the /machine/lmnt_marketplace/register_printer endpoint to register this printer")
         return False
     
     def save_printer_token(self, token, expiry):
@@ -170,15 +181,27 @@ class AuthManager:
     def _get_printer_id_from_token(self):
         """Extract printer ID from the JWT token"""
         if not self.printer_token:
+            logging.error("LMNT AUTH: Cannot extract printer ID - no token available")
             return None
         
         try:
             # Decode JWT without verification to extract printer_id
             # This is safe because we're not using the token for authentication here
             payload = jwt.decode(self.printer_token, options={"verify_signature": False})
-            return payload.get('printer_id')
+            printer_id = payload.get('printer_id')
+            
+            if printer_id:
+                logging.info(f"LMNT AUTH: Successfully extracted printer ID from token: {printer_id}")
+            else:
+                logging.error("LMNT AUTH: Token does not contain a printer_id claim")
+                if self.integration.debug_mode:
+                    logging.debug(f"LMNT AUTH: Token payload: {payload}")
+            
+            return printer_id
         except Exception as e:
-            logging.error(f"Error extracting printer ID from token: {str(e)}")
+            logging.error(f"LMNT AUTH: Error extracting printer ID from token: {str(e)}")
+            import traceback
+            logging.error(f"LMNT AUTH: {traceback.format_exc()}")
             return None
     
     def check_token_refresh(self):
