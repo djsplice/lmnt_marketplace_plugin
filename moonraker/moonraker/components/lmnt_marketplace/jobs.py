@@ -141,7 +141,7 @@ class JobManager:
         logging.info("LMNT JOB POLLING: _poll_for_jobs method called")
         
         # Check if we have a valid printer token and ID
-        printer_id = self.auth_manager.get_printer_id()
+        printer_id = self.integration.auth_manager.printer_id
         if not printer_id:
             logging.error("LMNT JOB POLLING: Cannot poll for jobs - no printer ID available")
             return
@@ -151,7 +151,7 @@ class JobManager:
         logging.info(f"LMNT JOB POLLING: Polling for jobs at: {api_url} for printer ID: {printer_id}")
         
         # Get the printer token for authentication
-        printer_token = self.auth_manager.get_printer_token()
+        printer_token = self.integration.auth_manager.printer_token
         if not printer_token:
             logging.error("LMNT JOB POLLING: Cannot poll for jobs - no printer token available")
             return
@@ -206,7 +206,7 @@ class JobManager:
                     elif response.status == 401:
                         # Token might be expired, try to refresh it
                         logging.warning("LMNT JOB POLLING: Received 401 Unauthorized, attempting to refresh token")
-                        await self.auth_manager.refresh_printer_token()
+                        await self.integration.auth_manager.refresh_printer_token()
                         
                     else:
                         # Log other error responses
