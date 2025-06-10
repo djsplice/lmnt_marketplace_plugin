@@ -80,27 +80,31 @@ class LmntMarketplacePlugin:
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/user_login", 
                 RequestType.POST, 
-                self._handle_user_login
+                self._handle_user_login,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/register_printer", 
                 RequestType.POST, 
-                self._handle_register_printer
+                self._handle_register_printer,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             # Manual job check endpoint (for local UI use only)
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/check_jobs", 
                 RequestType.POST, 
-                self._handle_manual_check_jobs
+                self._handle_manual_check_jobs,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             # Status endpoint
             self.server.register_endpoint(
                 "/machine/lmnt_marketplace/status", 
                 RequestType.GET, 
-                self._handle_status
+                self._handle_status,
+                auth_required=False  # Bypass Moonraker's JWT validation
             )
             
             logging.info("Registered LMNT Marketplace legacy endpoints")
@@ -175,7 +179,7 @@ class LmntMarketplacePlugin:
             
             # Check for Authorization header if user_token is not in body
             if not user_token:
-                auth_header = web_request.get_header('Authorization')
+                auth_header = web_request.headers.get('Authorization')
                 if auth_header and auth_header.startswith('Bearer '):
                     user_token = auth_header[7:]  # Remove 'Bearer ' prefix
                     logging.info("Using token from Authorization header")
