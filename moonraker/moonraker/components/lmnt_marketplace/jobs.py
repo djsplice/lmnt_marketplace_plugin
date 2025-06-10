@@ -350,21 +350,23 @@ class JobManager:
         """Check if printer is ready for a new print job"""
         logging.info("LMNT READY: Checking if printer is ready for printing")
         try:
-            # First, check if Klippy is connected and ready
+            # Check if Klippy is connected and ready using server.info endpoint
             try:
-                logging.info("LMNT READY: Getting printer info")
-                printer_info = await self.klippy_apis.get_printer_info()
-                printer_state = printer_info.get('state', '')
-                logging.info(f"LMNT READY: Printer state: '{printer_state}'")
+                logging.info("LMNT READY: Getting server info to check Klippy status")
+                result = await self.klippy_apis.run_method("server.info")
+                klippy_state = result.get('klippy_state', '')
+                logging.info(f"LMNT READY: Klippy state: '{klippy_state}'")
                 
-                if printer_state != 'ready':
-                    logging.info(f"LMNT READY: Printer not ready: '{printer_state}'")
+                if klippy_state != 'ready':
+                    logging.info(f"LMNT READY: Klippy not ready: '{klippy_state}'")
                     return False
             except Exception as e:
-                logging.error(f"LMNT READY: Error getting printer info: {str(e)}")
+                logging.error(f"LMNT READY: Error getting server info: {str(e)}")
+                import traceback
+                logging.error(f"LMNT READY: Exception traceback: {traceback.format_exc()}")
                 return False
             
-            # Only check print_stats if printer is connected and ready
+            # Check print_stats to see if printer is currently printing
             try:
                 logging.info("LMNT READY: Querying print_stats object")
                 result = await self.klippy_apis.query_objects({'objects': {'print_stats': None}})
@@ -375,9 +377,9 @@ class JobManager:
                     logging.info("LMNT READY: Printer is busy (printing or paused)")
                     return False
             except Exception as e:
-                # If we can't query print_stats, but printer is ready, we'll assume it's not printing
+                # If we can't query print_stats, but Klippy is ready, we'll assume it's not printing
                 logging.warning(f"LMNT READY: Error querying print_stats: {str(e)}")
-                logging.warning("LMNT READY: Assuming printer is not printing since it's in ready state")
+                logging.warning("LMNT READY: Assuming printer is not printing since Klippy is in ready state")
             
             # If we got here, the printer is ready and not printing
             logging.info("LMNT READY: Printer is ready for printing")
