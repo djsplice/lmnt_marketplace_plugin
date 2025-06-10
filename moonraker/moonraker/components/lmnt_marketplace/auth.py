@@ -225,8 +225,8 @@ class AuthManager:
             if not username or not password:
                 raise self.integration.server.error("Missing username or password", 400)
             
-            # Authenticate with CWS
-            login_url = f"{self.integration.cws_url}/api/login"
+            # Authenticate with CWS using the correct endpoint
+            login_url = f"{self.integration.cws_url}/auth/login"
             logging.info(f"Attempting login with URL: {login_url}")
             
             async with self.http_client.post(
@@ -293,7 +293,7 @@ class AuthManager:
             # Store user token temporarily for registration
             self.user_token = user_token
             
-            # Register printer with marketplace
+            # Register printer with marketplace using the correct endpoint
             register_url = f"{self.integration.marketplace_url}/api/register-printer"
             
             headers = {"Authorization": f"Bearer {self.user_token}"}
