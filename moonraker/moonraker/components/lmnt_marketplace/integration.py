@@ -39,12 +39,17 @@ class LmntMarketplaceIntegration:
         self.klippy_apis = None
         self.api_version = "1.0.0"
         
-        # Set up paths for tokens and data storage
+        # Set up paths for tokens, keys, and data storage
         data_path = self.server.get_app_args()['data_path']
-        self.tokens_path = os.path.join(data_path, "lmnt_marketplace", "tokens")
+        lmnt_data_path = os.path.join(data_path, "lmnt_marketplace")
+        self.tokens_path = os.path.join(lmnt_data_path, "tokens")
+        self.keys_path = os.path.join(lmnt_data_path, "keys")
         
         # Create directories if they don't exist
         os.makedirs(self.tokens_path, exist_ok=True)
+        os.makedirs(self.keys_path, exist_ok=True)
+        
+        logging.info(f"LMNT data paths: tokens={self.tokens_path}, keys={self.keys_path}")
         
         # API endpoints
         # Use configurable endpoints with defaults
