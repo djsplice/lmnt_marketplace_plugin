@@ -202,6 +202,49 @@ class AuthManager:
             60 * 60, self.check_token_refresh)
         return False
     
+    async def login_user(self, username, password):
+        """Login user to the LMNT Marketplace
+        
+        Args:
+            username: User's email or username
+            password: User's password
+            
+        Returns:
+            dict: Login response with token
+        """
+        try:
+            if not username or not password:
+                raise self.integration.server.error("Missing username or password", 400)
+            
+            # Authenticate with CWS
+            login_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/login"
+            
+            async with self.http_client.post(
+                login_url, 
+                json={"email": username, "password": password}
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logging.error(f"CWS login failed: {error_text}")
+                    raise self.integration.server.error(f"Login failed: {error_text}", response.status)
+                
+                data = await response.json()
+                token = data.get('token')
+                
+                if not token:
+                    raise self.integration.server.error("Login response missing token", 500)
+                
+                # Store user token temporarily for printer registration
+                self.user_token = token
+                
+                return {"status": "success", "token": token}
+        except aiohttp.ClientError as e:
+            logging.error(f"HTTP error during user login: {str(e)}")
+            raise self.integration.server.error(f"Connection error: {str(e)}", 500)
+        except Exception as e:
+            logging.error(f"Error during user login: {str(e)}")
+            raise self.integration.server.error(f"Login error: {str(e)}", 500)
+            
     async def _handle_user_login(self, web_request):
         """Handle user login to the CWS and obtain user JWT"""
         try:
@@ -214,53 +257,31 @@ class AuthManager:
                 raise web_request.error(
                     "Missing email or password", 400)
             
-            # Authenticate with CWS
-            login_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/login"
-            
-            async with self.http_client.post(
-                login_url, 
-                json={"email": email, "password": password}
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"CWS login failed: {error_text}")
-                    raise web_request.error(
-                        f"Login failed: {error_text}", response.status)
-                
-                data = await response.json()
-                token = data.get('token')
-                
-                if not token:
-                    raise web_request.error(
-                        "Login response missing token", 500)
-                
-                # Store user token temporarily for printer registration
-                self.user_token = token
-                
-                return {"status": "success", "token": token}
-        except aiohttp.ClientError as e:
-            logging.error(f"HTTP error during user login: {str(e)}")
-            raise web_request.error(
-                f"Connection error: {str(e)}", 500)
+            result = await self.login_user(email, password)
+            return result
         except Exception as e:
-            logging.error(f"Error during user login: {str(e)}")
-            raise web_request.error(
-                f"Login error: {str(e)}", 500)
+            logging.error(f"Error during user login handler: {str(e)}")
+            raise web_request.error(f"Login error: {str(e)}", 500)
     
-    async def _handle_register_printer(self, web_request):
-        """Handle printer registration with marketplace"""
+    async def register_printer(self, user_token, printer_name):
+        """Register printer with the LMNT Marketplace
+        
+        Args:
+            user_token: User's JWT token
+            printer_name: Name for the printer
+            
+        Returns:
+            dict: Registration response
+        """
         try:
-            # Extract registration data from request
-            reg_data = await web_request.get_json_data()
-            printer_name = reg_data.get('printer_name')
-            
             if not printer_name:
-                raise web_request.error(
-                    "Missing printer name", 400)
+                raise self.integration.server.error("Missing printer name", 400)
             
-            if not self.user_token:
-                raise web_request.error(
-                    "User must login first", 401)
+            if not user_token:
+                raise self.integration.server.error("Missing user token", 401)
+            
+            # Store user token temporarily for registration
+            self.user_token = user_token
             
             # Register printer with marketplace
             register_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/register-printer"
@@ -275,16 +296,14 @@ class AuthManager:
                 if response.status != 200:
                     error_text = await response.text()
                     logging.error(f"Printer registration failed: {error_text}")
-                    raise web_request.error(
-                        f"Registration failed: {error_text}", response.status)
+                    raise self.integration.server.error(f"Registration failed: {error_text}", response.status)
                 
                 data = await response.json()
                 printer_token = data.get('token')
                 encrypted_psek = data.get('kek_id')  # Actually contains encrypted PSEK
                 
                 if not printer_token:
-                    raise web_request.error(
-                        "Registration response missing token", 500)
+                    raise self.integration.server.error("Registration response missing token", 500)
                 
                 # Calculate expiry (30 days from now)
                 expiry = datetime.now() + timedelta(days=30)
@@ -302,12 +321,31 @@ class AuthManager:
                 return {"status": "success", "printer_id": self.printer_id}
         except aiohttp.ClientError as e:
             logging.error(f"HTTP error during printer registration: {str(e)}")
-            raise web_request.error(
-                f"Connection error: {str(e)}", 500)
+            raise self.integration.server.error(f"Connection error: {str(e)}", 500)
         except Exception as e:
             logging.error(f"Error during printer registration: {str(e)}")
-            raise web_request.error(
-                f"Registration error: {str(e)}", 500)
+            raise self.integration.server.error(f"Registration error: {str(e)}", 500)
+            
+    async def _handle_register_printer(self, web_request):
+        """Handle printer registration with marketplace"""
+        try:
+            # Extract registration data from request
+            reg_data = await web_request.get_json_data()
+            printer_name = reg_data.get('printer_name')
+            
+            if not printer_name:
+                raise web_request.error(
+                    "Missing printer name", 400)
+            
+            if not self.user_token:
+                raise web_request.error(
+                    "User must login first", 401)
+            
+            result = await self.register_printer(self.user_token, printer_name)
+            return result
+        except Exception as e:
+            logging.error(f"Error during printer registration handler: {str(e)}")
+            raise web_request.error(f"Registration error: {str(e)}", 500)
     
     async def _handle_manual_register(self, web_request):
         """Handle manual printer registration with the LMNT Marketplace"""

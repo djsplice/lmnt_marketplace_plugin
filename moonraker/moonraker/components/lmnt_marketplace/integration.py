@@ -46,8 +46,13 @@ class LmntMarketplaceIntegration:
         os.makedirs(self.tokens_path, exist_ok=True)
         
         # API endpoints
-        self.marketplace_url = "https://api.lmnt.market"
-        self.cws_url = "https://cws.lmnt.market"
+        # Use configurable endpoints with defaults
+        self.marketplace_url = self.config.get('marketplace_url', "https://api.lmnt.market")
+        self.cws_url = self.config.get('cws_url', "https://cws.lmnt.market")
+        
+        # Log the configured endpoints
+        logging.info(f"LMNT Marketplace API URL: {self.marketplace_url}")
+        logging.info(f"LMNT CWS URL: {self.cws_url}")
         
         # Get event loop for scheduling tasks
         self.eventloop = self.server.get_event_loop()
