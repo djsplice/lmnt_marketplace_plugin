@@ -30,6 +30,23 @@ class JobManager:
         self.current_print_job = None
         self.print_job_started = False
         self.job_polling_task = None
+        
+        # References to other managers
+        self.auth_manager = None
+        self.crypto_manager = None
+        self.gcode_manager = None
+    
+    def set_auth_manager(self, auth_manager):
+        """Set the authentication manager reference"""
+        self.auth_manager = auth_manager
+        
+    def set_crypto_manager(self, crypto_manager):
+        """Set the crypto manager reference"""
+        self.crypto_manager = crypto_manager
+        
+    def set_gcode_manager(self, gcode_manager):
+        """Set the gcode manager reference"""
+        self.gcode_manager = gcode_manager
     
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
