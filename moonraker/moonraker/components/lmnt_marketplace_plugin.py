@@ -106,19 +106,21 @@ class LmntMarketplacePlugin:
     async def _handle_user_login(self, web_request):
         """Handle user login (legacy endpoint)"""
         try:
-            # Extract login credentials from the request body
-            try:
-                # Get the raw body data and parse it as JSON
-                body = web_request.get_body_argument('', default=None)
-                if body is None:
-                    body = web_request.body
-                request_data = jsonw.loads(body)
-            except Exception:
-                logging.exception("Error parsing JSON request")
-                raise self.server.error("Invalid JSON in request body", 400)
+            # Parse the request arguments
+            args = {}
+            for key in web_request.arguments.keys():
+                args[key] = web_request.get_argument(key)
                 
-            username = request_data.get('username')
-            password = request_data.get('password')
+            # If no arguments, try to parse the body as JSON
+            if not args and hasattr(web_request, 'body'):
+                try:
+                    args = jsonw.loads(web_request.body)
+                except Exception:
+                    logging.exception("Error parsing JSON request")
+                    raise self.server.error("Invalid JSON in request body", 400)
+            
+            username = args.get('username')
+            password = args.get('password')
             
             if not username or not password:
                 raise self.server.error("Missing username or password", 400)
@@ -133,19 +135,21 @@ class LmntMarketplacePlugin:
     async def _handle_register_printer(self, web_request):
         """Handle printer registration (legacy endpoint)"""
         try:
-            # Extract registration data from the request body
-            try:
-                # Get the raw body data and parse it as JSON
-                body = web_request.get_body_argument('', default=None)
-                if body is None:
-                    body = web_request.body
-                request_data = jsonw.loads(body)
-            except Exception:
-                logging.exception("Error parsing JSON request")
-                raise self.server.error("Invalid JSON in request body", 400)
+            # Parse the request arguments
+            args = {}
+            for key in web_request.arguments.keys():
+                args[key] = web_request.get_argument(key)
                 
-            user_token = request_data.get('user_token')
-            printer_name = request_data.get('printer_name')
+            # If no arguments, try to parse the body as JSON
+            if not args and hasattr(web_request, 'body'):
+                try:
+                    args = jsonw.loads(web_request.body)
+                except Exception:
+                    logging.exception("Error parsing JSON request")
+                    raise self.server.error("Invalid JSON in request body", 400)
+            
+            user_token = args.get('user_token')
+            printer_name = args.get('printer_name')
             
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
