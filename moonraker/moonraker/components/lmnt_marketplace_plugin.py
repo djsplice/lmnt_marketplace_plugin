@@ -106,12 +106,20 @@ class LmntMarketplacePlugin:
     async def _handle_user_login(self, web_request):
         """Handle user login (legacy endpoint)"""
         try:
-            # Parse the request using Moonraker's approach
+            # Parse the request arguments
             args = {}
-            content_type = web_request.request.headers.get('Content-Type', "").strip()
-            if content_type.startswith("application/json"):
+            
+            # Try to get arguments from the request
+            for key in web_request.get_args():
+                args[key] = web_request.get_str(key)
+            
+            # If no arguments found, try to parse JSON from the body
+            if not args:
                 try:
-                    args = jsonw.loads(web_request.request.body)
+                    # Get the raw body data
+                    body = web_request.get_body()
+                    if body:
+                        args = jsonw.loads(body)
                 except Exception:
                     logging.exception("Error parsing JSON request")
                     raise self.server.error("Invalid JSON in request body", 400)
@@ -132,12 +140,20 @@ class LmntMarketplacePlugin:
     async def _handle_register_printer(self, web_request):
         """Handle printer registration (legacy endpoint)"""
         try:
-            # Parse the request using Moonraker's approach
+            # Parse the request arguments
             args = {}
-            content_type = web_request.request.headers.get('Content-Type', "").strip()
-            if content_type.startswith("application/json"):
+            
+            # Try to get arguments from the request
+            for key in web_request.get_args():
+                args[key] = web_request.get_str(key)
+            
+            # If no arguments found, try to parse JSON from the body
+            if not args:
                 try:
-                    args = jsonw.loads(web_request.request.body)
+                    # Get the raw body data
+                    body = web_request.get_body()
+                    if body:
+                        args = jsonw.loads(body)
                 except Exception:
                     logging.exception("Error parsing JSON request")
                     raise self.server.error("Invalid JSON in request body", 400)
