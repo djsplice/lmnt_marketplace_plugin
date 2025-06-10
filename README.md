@@ -149,6 +149,62 @@ cat ~/printer_data/logs/moonraker.log | grep "lmnt_marketplace"
 
 ## LMNT Marketplace API Endpoints
 
+### User Login
+
+Endpoint for user authentication with the LMNT Marketplace.
+
+```
+POST /machine/lmnt_marketplace/user_login
+```
+
+Request body:
+```json
+{
+  "username": "user@example.com",
+  "password": "your_password"
+}
+```
+
+Response:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user_id": "user-uuid"
+}
+```
+
+### Printer Registration
+
+Endpoint to register a printer with the LMNT Marketplace.
+
+```
+POST /machine/lmnt_marketplace/register_printer
+```
+
+Request body:
+```json
+{
+  "user_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "printer_name": "My Printer",
+  "manufacturer": "Printer Brand",
+  "model": "Printer Model"
+}
+```
+
+Response:
+```json
+{
+  "id": "printer-uuid",
+  "user_id": "user-uuid",
+  "printer_name": "My Printer",
+  "manufacturer": "Printer Brand",
+  "model": "Printer Model",
+  "kek_id": "encrypted-key-data",
+  "printer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_expires": "2025-07-10T06:18:50.357Z"
+}
+```
+
 ### Printer Token Refresh
 The system uses a dedicated endpoint for refreshing printer tokens:
 
