@@ -2,6 +2,28 @@
 
 A plugin system that enables secure handling of encrypted G-code files for Klipper-based 3D printers, integrating with Moonraker for web-based control and the LMNT Marketplace for secure printer token management.
 
+## Installation
+
+The plugin can be installed using the provided installation scripts:
+
+```bash
+# Clone the repository
+git clone https://github.com/your-username/encrypted_gcode_plugin.git
+cd encrypted_gcode_plugin
+
+# Run the installation script
+./scripts/install.sh
+
+# Or use make
+make install
+
+# Restart Moonraker and Klipper
+sudo systemctl restart moonraker
+sudo systemctl restart klipper
+```
+
+For detailed installation instructions, see [Installation Guide](docs/installation.md).
+
 ## Features
 
 - Secure G-code file handling with Fernet encryption
@@ -145,6 +167,8 @@ The printer plugin automatically handles token refresh when tokens approach expi
 
 ## Testing
 
+### Basic Integration Testing
+
 A standalone test script (`test_marketplace_integration.py`) is available for testing the LMNT Marketplace integration:
 
 ```bash
@@ -167,6 +191,40 @@ This script tests:
 - Printer token refresh flow
 - PSEK decryption via CWS
 - Simulated G-code encryption/decryption
+
+### Advanced Component Testing
+
+Advanced component tests (`advanced_component_tests.py`) are available for comprehensive local testing of GCode and Job managers without external dependencies:
+
+```bash
+# Run the advanced component tests
+python advanced_component_tests.py
+```
+
+These tests leverage a dynamic extension system that patches the GCodeManager and JobManager classes with test-specific methods:
+
+#### GCode Manager Extensions
+- `extract_metadata`: Extracts metadata from encrypted GCode files
+- `extract_thumbnails`: Extracts and saves thumbnails from encrypted GCode files
+- `decrypt_and_stream`: Decrypts GCode in memory and streams it line-by-line to Klipper
+
+#### Job Manager Extensions
+- `add_job`: Adds a job to the queue
+- `get_next_job`: Gets the next job from the queue
+- `remove_job`: Removes a job from the queue
+- `update_job_status`: Updates the status of a job
+- `get_job_status`: Gets the current status of a job
+- `process_job`: Processes a job through its lifecycle
+
+#### Test Coverage
+- GCode metadata extraction
+- Thumbnail extraction
+- Memory-efficient GCode streaming
+- Error handling during decryption and streaming
+- Job queue management
+- Job status updates
+
+The extension system is designed to be modular and can be easily extended with additional test methods as needed.
 
 Query file metadata:
 ```bash
