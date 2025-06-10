@@ -107,6 +107,14 @@ class LmntMarketplacePlugin:
                 auth_required=False  # Bypass Moonraker's JWT validation
             )
             
+            # Token refresh endpoint
+            self.server.register_endpoint(
+                "/machine/lmnt_marketplace/refresh_token", 
+                RequestType.POST, 
+                self._handle_refresh_token,
+                auth_required=False  # Bypass Moonraker's JWT validation
+            )
+            
             logging.info("Registered LMNT Marketplace legacy endpoints")
         except Exception as e:
             logging.error(f"Error registering legacy endpoints: {str(e)}")
@@ -200,9 +208,9 @@ class LmntMarketplacePlugin:
     async def _handle_manual_check_jobs(self, web_request):
         """Handle manual job check (legacy endpoint)"""
         try:
-            # Delegate to the job manager
-            result = await self.integration.job_manager.check_for_jobs()
-            return {"status": "success", "message": "Job check initiated"}
+            # For now, just return job status since check_for_jobs is not implemented
+            job_status = await self.integration.job_manager.get_status()
+            return {"status": "success", "message": "Job status retrieved", "job_status": job_status}
         except Exception as e:
             logging.error(f"Error initiating job check: {str(e)}")
             raise self.server.error(str(e), 500)
@@ -224,6 +232,24 @@ class LmntMarketplacePlugin:
             return status
         except Exception as e:
             logging.error(f"Error getting status: {str(e)}")
+            raise self.server.error(str(e), 500)
+            
+    async def _handle_refresh_token(self, web_request):
+        """Handle printer token refresh (legacy endpoint)"""
+        try:
+            # Delegate to the auth manager
+            result = await self.integration.auth_manager.refresh_printer_token()
+            if result:
+                return {
+                    "status": "success",
+                    "printer_id": self.integration.auth_manager.printer_id,
+                    "expiry": self.integration.auth_manager.token_expiry.isoformat() 
+                            if self.integration.auth_manager.token_expiry else None
+                }
+            else:
+                raise self.server.error("Failed to refresh printer token", 500)
+        except Exception as e:
+            logging.error(f"Error refreshing printer token: {str(e)}")
             raise self.server.error(str(e), 500)
 
 

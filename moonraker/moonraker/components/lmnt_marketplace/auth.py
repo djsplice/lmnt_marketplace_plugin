@@ -188,18 +188,30 @@ class AuthManager:
             async with self.http_client.post(refresh_url, headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
-                    new_token = data.get('token')
+                    logging.info(f"Token refresh response: {data}")
+                    new_token = data.get('printer_token')  # Changed from 'token' to 'printer_token'
                     
                     if new_token:
-                        # Calculate expiry (30 days from now)
-                        expiry = datetime.now() + timedelta(days=30)
+                        # Get expiry from response or calculate it
+                        token_expires = data.get('token_expires')
+                        expiry = None
+                        if token_expires:
+                            try:
+                                expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
+                            except ValueError:
+                                # Calculate expiry (30 days from now) if parsing fails
+                                expiry = datetime.now() + timedelta(days=30)
+                                logging.warning(f"Could not parse token expiry: {token_expires}, using default")
+                        else:
+                            # Calculate expiry (30 days from now) if not provided
+                            expiry = datetime.now() + timedelta(days=30)
                         
                         # Save the new token
                         self.save_printer_token(new_token, expiry)
                         logging.info("Printer token refreshed successfully")
                         return True
                     else:
-                        logging.error("Token refresh response missing token field")
+                        logging.error("Token refresh response missing printer_token field")
                 else:
                     error_text = await response.text()
                     logging.error(f"Token refresh failed with status {response.status}: {error_text}")
@@ -329,10 +341,20 @@ class AuthManager:
                     # Try to parse as JSON if possible
                     try:
                         data = json.loads(response_text)
-                        printer_token = data.get('token')
+                        printer_token = data.get('printer_token')  # Changed from 'token' to 'printer_token'
                         if printer_token:
-                            self._save_printer_token(printer_token)
+                            # Save token and expiry
+                            token_expires = data.get('token_expires')
+                            expiry = None
+                            if token_expires:
+                                try:
+                                    expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
+                                except ValueError:
+                                    logging.warning(f"Could not parse token expiry: {token_expires}")
+                            
+                            self.save_printer_token(printer_token, expiry)
                             logging.info("Printer token saved successfully")
+                            self.printer_id = data.get('id')
                         return data
                     except json.JSONDecodeError:
                         logging.warning("Response was not valid JSON, returning as text")
