@@ -83,12 +83,12 @@ class CryptoManager:
             logging.error(f"Error saving encrypted PSEK: {str(e)}")
             return False
     
-    async def decrypt_dek(self, encrypted_dek_hex):
+    async def decrypt_dek(self, encrypted_dek):
         """
         Decrypt the encrypted DEK using the CWS service
         
         Args:
-            encrypted_dek_hex (str): Encrypted DEK in hex format
+            encrypted_dek (str): Encrypted DEK from the marketplace API
             
         Returns:
             bytes: Decrypted DEK if successful
@@ -99,7 +99,7 @@ class CryptoManager:
             logging.info("Using development mode fixed DEK")
             # Return a fixed 32-byte key for development mode
             return b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f'
-        if not encrypted_dek_hex:
+        if not encrypted_dek:
             logging.error("Cannot decrypt empty DEK")
             return None
             
@@ -120,25 +120,29 @@ class CryptoManager:
             logging.info(f"Token length: {len(self.integration.auth_manager.printer_token) if self.integration.auth_manager.printer_token else 'N/A'}")
             
             # Log payload details
-            logging.info(f"Encrypted DEK hex length: {len(encrypted_dek_hex)}")
-            logging.info(f"Encrypted DEK hex: {encrypted_dek_hex[:20]}...{encrypted_dek_hex[-20:]}")
+            logging.info(f"Encrypted DEK length: {len(encrypted_dek)}")
+            logging.info(f"Encrypted DEK (first/last 20 chars): {encrypted_dek[:20]}...{encrypted_dek[-20:]}")
             
             headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
             
+            # Determine if the encrypted DEK is in hex format or already in base64 format
+            is_hex_format = all(c in '0123456789abcdefABCDEF' for c in encrypted_dek)
+            
             # CWS API expects dataToDecrypt as a base64 string
             try:
-                # Log the original encrypted DEK hex
-                logging.info(f"Original encrypted DEK hex: {encrypted_dek_hex[:10]}...{encrypted_dek_hex[-10:]} (length: {len(encrypted_dek_hex)})")
-                
-                # First convert hex to bytes
-                encrypted_dek_bytes = bytes.fromhex(encrypted_dek_hex)
-                logging.info(f"Converted to bytes, length: {len(encrypted_dek_bytes)}, first 8 bytes: {encrypted_dek_bytes[:8].hex()}")
-                
-                # Then convert bytes to base64
-                encrypted_dek_base64 = base64.b64encode(encrypted_dek_bytes).decode('utf-8')
-                logging.info(f"Converted to base64: {encrypted_dek_base64[:10]}...{encrypted_dek_base64[-10:]} (length: {len(encrypted_dek_base64)})")
+                if is_hex_format:
+                    logging.info("Encrypted DEK appears to be in hex format, converting to base64")
+                    # Convert hex to bytes then to base64
+                    encrypted_dek_bytes = bytes.fromhex(encrypted_dek)
+                    encrypted_dek_base64 = base64.b64encode(encrypted_dek_bytes).decode('utf-8')
+                else:
+                    logging.info("Encrypted DEK appears to already be in base64 format or another format")
+                    # Assume it's already in base64 format
+                    encrypted_dek_base64 = encrypted_dek
+                    
+                logging.info(f"DEK to send to CWS (first/last 10 chars): {encrypted_dek_base64[:10]}...{encrypted_dek_base64[-10:]} (length: {len(encrypted_dek_base64)})")
             except Exception as e:
-                logging.error(f"Error converting encrypted DEK from hex to base64: {str(e)}")
+                logging.error(f"Error processing encrypted DEK: {str(e)}")
                 return None
                 
             # CWS API expects 'dataToDecrypt' field with base64 data
