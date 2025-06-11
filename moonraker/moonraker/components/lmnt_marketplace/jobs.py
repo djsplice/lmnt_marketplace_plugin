@@ -205,12 +205,19 @@ class JobManager:
                                         'purchase_id': job.get('purchase_id'),
                                         'status': job.get('status'),
                                         'created_at': job.get('created_at'),
-                                        # Use the gcode_url from the API response
-                                        'gcode_url': job.get('gcode_url')
+                                        # New fields for decryption
+                                        'gcode_url': job.get('encrypted_gcode_download_url'), # This is the HTTP(S) URL for the encrypted G-code
+                                        'gcode_dek_encrypted_hex': job.get('gcode_dek_encrypted_hex'),
+                                        'gcode_iv_hex': job.get('gcode_iv_hex'),
+                                        'user_account_id': job.get('user_account_id'),
+                                        'printer_kek_id': job.get('printer_kek_id')
                                     }
                                     logging.info(f"LMNT JOB POLLING: Job data: {processed_job}")
-                                    if not processed_job['gcode_url']:
-                                        logging.error(f"LMNT JOB POLLING: Missing gcode_url for job {print_job_id}")
+                                    if not processed_job.get('gcode_url'):
+                                        logging.error(f"LMNT JOB POLLING: Missing encrypted_gcode_download_url for job {print_job_id}")
+                                        continue
+                                    if not all(processed_job.get(k) for k in ['gcode_dek_encrypted_hex', 'gcode_iv_hex', 'printer_kek_id']):
+                                        logging.error(f"LMNT JOB POLLING: Missing one or more crypto fields for job {print_job_id}: DEK_encrypted_hex, IV_hex, or printer_kek_id")
                                         continue
                                     # Add job to queue for processing
                                     await self._process_pending_jobs([processed_job])
@@ -344,7 +351,7 @@ class JobManager:
         logging.info(f"LMNT PROCESS: Updating job status to 'processing'")
         await self._update_job_status(job_id, 'processing', 'Starting job')
         
-        # Download and decrypt GCode
+        # Download GCode
         logging.info(f"LMNT PROCESS: Starting download of GCode for job {job_id}")
         encrypted_filepath = await self._download_gcode(job)
         
@@ -356,18 +363,61 @@ class JobManager:
             return
         
         logging.info(f"LMNT PROCESS: Successfully downloaded encrypted GCode to {encrypted_filepath}")
-        
-        # Start printing
-        logging.info(f"LMNT PROCESS: Starting print for job {job_id}")
-        success = await self._start_print(job, encrypted_filepath)
+
+        # Decrypt GCode
+        logging.info(f"LMNT PROCESS: Starting decryption of GCode for job {job_id} at {encrypted_filepath}")
+        decrypted_filepath = None
+        try:
+            decrypted_filepath = await self.integration.crypto_manager.decrypt_gcode_file_from_job_details(
+                encrypted_filepath,
+                job, # Pass the whole job dictionary
+                job_id
+            )
+        except Exception as e_decrypt:
+            logging.error(f"LMNT PROCESS: Exception during GCode decryption for job {job_id}: {e_decrypt}")
+            import traceback
+            logging.error(f"LMNT PROCESS: Decryption exception traceback: {traceback.format_exc()}")
+
+        if not decrypted_filepath:
+            logging.error(f"LMNT PROCESS: Failed to decrypt GCode for job {job_id}")
+            await self._update_job_status(job_id, 'failed', 'Failed to decrypt GCode')
+            if os.path.exists(encrypted_filepath):
+                try:
+                    os.remove(encrypted_filepath)
+                    logging.info(f"LMNT PROCESS: Cleaned up encrypted file {encrypted_filepath} after decryption failure.")
+                except Exception as e_rm_enc:
+                    logging.error(f"LMNT PROCESS: Error cleaning up encrypted file {encrypted_filepath}: {e_rm_enc}")
+            self.current_print_job = None
+            return
+
+        logging.info(f"LMNT PROCESS: Successfully decrypted GCode for job {job_id} to {decrypted_filepath}")
+        # Clean up the original encrypted file after successful decryption
+        if os.path.exists(encrypted_filepath):
+            try:
+                os.remove(encrypted_filepath)
+                logging.info(f"LMNT PROCESS: Cleaned up original encrypted file {encrypted_filepath}")
+            except Exception as e_rm_enc_orig:
+                logging.error(f"LMNT PROCESS: Error cleaning up original encrypted file {encrypted_filepath}: {e_rm_enc_orig}")
+
+        # Start printing with the DECRYPTED file
+        logging.info(f"LMNT PROCESS: Starting print for job {job_id} with decrypted file {decrypted_filepath}")
+        success = await self._start_print(job, decrypted_filepath) # Pass decrypted_filepath
         
         if not success:
             logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
             await self._update_job_status(job_id, 'failed', 'Failed to start print')
-            self.current_print_job = None
-            logging.info(f"LMNT PROCESS: Reset current_print_job to None due to print start failure")
+            # No current_print_job reset here, _start_print might have its own logic or it's a final state
         else:
             logging.info(f"LMNT PROCESS: Successfully started print for job {job_id}")
+        
+        # Cleanup decrypted file after attempting to start print, regardless of success, 
+        # as Klipper/Moonraker should have taken over or it failed.
+        if decrypted_filepath and os.path.exists(decrypted_filepath):
+            try:
+                os.remove(decrypted_filepath)
+                logging.info(f"LMNT PROCESS: Cleaned up decrypted file {decrypted_filepath}")
+            except Exception as e_rm_dec:
+                logging.error(f"LMNT PROCESS: Error cleaning up decrypted file {decrypted_filepath}: {e_rm_dec}")
 
     
     async def _check_printer_ready(self):
@@ -588,21 +638,21 @@ class JobManager:
         
         return None
     
-    async def _start_print(self, job, encrypted_filepath):
+    async def _start_print(self, job, decrypted_filepath):
         """
         Start printing a job
         
         Args:
             job (dict): Job information
-            encrypted_filepath (str): Path to encrypted GCode file
+            decrypted_filepath (str): Path to DECRYPTED GCode file
             
         Returns:
             bool: True if print started successfully, False otherwise
         """
         job_id = job.get('id')
         
-        if not job_id or not encrypted_filepath:
-            logging.error("LMNT PRINT: Cannot start print: Missing job ID or encrypted file path")
+        if not job_id or not decrypted_filepath:
+            logging.error("LMNT PRINT: Cannot start print: Missing job ID or decrypted file path")
             return False
         
         logging.info(f"LMNT PRINT: Starting print for job {job_id}")
@@ -614,19 +664,8 @@ class JobManager:
                 logging.error(f"LMNT PRINT: Cannot start print for job {job_id}: Printer not ready")
                 return False
             
-            # Get the DEK and IV for decryption
-            logging.info(f"LMNT PRINT: Getting DEK and IV for job {job_id}")
-            gcode_dek, gcode_iv = await self._get_gcode_dek(job_id)
-            
-            if not gcode_dek:
-                logging.error(f"LMNT PRINT: Failed to get DEK for job {job_id}")
-                return False
-                
-            logging.info(f"LMNT PRINT: Successfully retrieved DEK for job {job_id}")
-            if gcode_iv:
-                logging.info(f"LMNT PRINT: Successfully retrieved IV for job {job_id}")
-            else:
-                logging.warning(f"LMNT PRINT: No IV available for job {job_id}, will attempt decryption without it")
+            # Decryption is now handled before this method is called.
+            # gcode_filepath (now decrypted_filepath) is already plaintext.
             
             # Home the printer if needed
             try:
@@ -637,41 +676,17 @@ class JobManager:
                 logging.error(f"LMNT PRINT: Error homing printer: {str(e)}")
                 return False
             
-            # Read the encrypted file
-            try:
-                logging.info(f"LMNT PRINT: Reading encrypted file: {encrypted_filepath}")
-                with open(encrypted_filepath, 'rb') as f:
-                    encrypted_data = f.read()
-                logging.info(f"LMNT PRINT: Read {len(encrypted_data)} bytes of encrypted data")
-            except Exception as e:
-                logging.error(f"LMNT PRINT: Error reading encrypted file: {str(e)}")
-                return False
-            
-            # Decrypt the data
-            try:
-                logging.info(f"LMNT PRINT: Decrypting G-code data using DEK")
-                # Pass the DEK and IV to the decrypt_gcode method
-                decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(
-                    encrypted_data, job_id, dek=gcode_dek, iv=gcode_iv)
-                
-                if not decrypted_gcode:
-                    logging.error(f"LMNT PRINT: Failed to decrypt G-code for job {job_id}")
-                    return False
-                    
-                logging.info(f"LMNT PRINT: Successfully decrypted {len(decrypted_gcode)} bytes of G-code")
-            except Exception as e:
-                logging.error(f"LMNT PRINT: Error decrypting G-code: {str(e)}")
-                import traceback
-                logging.error(f"LMNT PRINT: Exception traceback: {traceback.format_exc()}")
-                return False
+            # File at decrypted_filepath is already plaintext.
+            # No need to read and decrypt it here.
             
             # Stream decrypted GCode to Klipper
-            logging.info(f"LMNT PRINT: Streaming decrypted G-code to Klipper")
+            # The file at decrypted_filepath is already plaintext.
+            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper")
             metadata = await self.integration.gcode_manager.stream_decrypted_gcode(
-                encrypted_filepath, job_id)
+                decrypted_filepath, job_id) # Pass the path to the decrypted file
             
             if not metadata:
-                logging.error(f"LMNT PRINT: Failed to stream G-code for job {job_id}")
+                logging.error(f"LMNT PRINT: Failed to stream G-code for job {job_id} from {decrypted_filepath}")
                 return False
             
             # Save metadata
@@ -693,100 +708,8 @@ class JobManager:
             logging.error(f"LMNT PRINT: Exception traceback: {traceback.format_exc()}")
             return False
     
-    async def _get_gcode_dek(self, job_id):
-        """
-        Get the encrypted GCode DEK and IV for a job from the marketplace API
-        
-        Args:
-            job_id (str): Job ID to get DEK for
-            
-        Returns:
-            tuple: (Base64-encoded DEK, hex-encoded IV) if successful
-            (None, None): If DEK could not be obtained
-        """
-        api_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
-        logging.info(f"LMNT DEK: Getting DEK from: {api_url}")
-        
-        # Get the printer token for authentication
-        printer_token = self.integration.auth_manager.printer_token
-        if not printer_token:
-            logging.error("LMNT DEK: Cannot get DEK - no printer token available")
-            return None, None
-            
-        # Set up the request headers with authentication
-        headers = {
-            "Authorization": f"Bearer {printer_token}",
-            "Content-Type": "application/json"
-        }
-        
-        try:
-            # Make the API request
-            start_time = time.time()
-            async with self.http_client.get(api_url, headers=headers) as response:
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                logging.info(f"LMNT DEK: Response received in {elapsed_ms}ms with status: {response.status}")
-                
-                if response.status != 200:
-                    error_text = await response.text()
-                    logging.error(f"LMNT DEK: Failed to get print job details: {response.status}: {error_text}")
-                    return None, None
-                    
-                # Parse the response JSON
-                data = await response.json()
-                logging.info(f"LMNT DEK: Received job details for job {job_id}")
-                
-                # Log the full response for debugging
-                logging.info(f"LMNT DEK: Full API response: {data}")
-                
-                # Check if the response contains the DEK and IV
-                encrypted_dek = data.get('gcode_dek')
-                gcode_iv = data.get('gcode_iv_hex')
-                
-                if encrypted_dek:
-                    logging.info(f"LMNT DEK: Successfully retrieved encrypted DEK for job {job_id}")
-                    logging.info(f"LMNT DEK: Encrypted DEK length: {len(encrypted_dek)}, DEK: {encrypted_dek[:20]}...")
-                    
-                    # Decrypt the DEK using the CWS service
-                    printer_kek_id = self.integration.auth_manager.printer_kek_id
-                    if not printer_kek_id:
-                        logging.error(f"LMNT DEK: Cannot decrypt DEK for job {job_id} - printer_kek_id not found in AuthManager.")
-                        return None, None
-                    logging.info(f"LMNT DEK: Decrypting DEK via CWS for job {job_id} using KEK ID: {printer_kek_id[:10]}...")
-                    decrypted_dek_bytes = await self.integration.crypto_manager.decrypt_dek(encrypted_dek, kek_id=printer_kek_id)
-                    
-                    if decrypted_dek_bytes:
-                        # Convert to base64 for use with Fernet
-                        decrypted_dek = base64.b64encode(decrypted_dek_bytes).decode('utf-8')
-                        logging.info(f"LMNT DEK: Successfully decrypted DEK for job {job_id}, length: {len(decrypted_dek)}")
-                        gcode_dek = decrypted_dek
-                    else:
-                        logging.error(f"LMNT DEK: Failed to decrypt DEK for job {job_id}")
-                        gcode_dek = None
-                else:
-                    logging.error(f"LMNT DEK: Response missing gcode_dek field for job {job_id}")
-                    gcode_dek = None
-                    
-                if gcode_iv:
-                    logging.info(f"LMNT DEK: Successfully retrieved IV for job {job_id}")
-                    logging.info(f"LMNT DEK: IV length: {len(gcode_iv)}, IV: {gcode_iv}")
-                else:
-                    logging.warning(f"LMNT DEK: Response missing gcode_iv_hex field for job {job_id}")
-                
-                # In development mode, use default values if DEK or IV is missing
-                if self.integration.development_mode and (gcode_dek is None or gcode_iv is None):
-                    logging.info(f"LMNT DEK: Using development mode default DEK and IV")
-                    # Default DEK and IV for development mode
-                    gcode_dek = "TGludXggaXMgdGhlIGJlc3Qgb3BlcmF0aW5nIHN5c3RlbSBmb3IgM0QgcHJpbnRpbmc="  # Base64 encoded test key
-                    gcode_iv = "000102030405060708090a0b0c0d0e0f"  # Default test IV
-                    
-                return gcode_dek, gcode_iv
-        except Exception as e:
-            logging.error(f"LMNT DEK: Error getting DEK for job {job_id}: {str(e)}")
-            import traceback
-            logging.error(f"LMNT DEK: Exception traceback: {traceback.format_exc()}")
-            return None, None
-        
-        return None, None
+    # This method is no longer needed as _poll_for_jobs now provides all crypto materials.
+    # async def _get_gcode_dek(self, job_id): ... (entire method removed)
     
     async def _update_job_status(self, job_id, status, message=None):
         """

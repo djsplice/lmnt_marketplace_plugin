@@ -220,6 +220,79 @@ class CryptoManager:
             logging.error(traceback.format_exc())
             return None
 
+    async def decrypt_gcode_file_from_job_details(self, encrypted_filepath, job_details_dict, job_id):
+        """
+        Decrypts an encrypted G-code file using details from the job dictionary.
+
+        Args:
+            encrypted_filepath (str): Path to the encrypted G-code file.
+            job_details_dict (dict): Dictionary containing job details, including crypto materials:
+                                     'gcode_dek_encrypted_hex', 'gcode_iv_hex', 'printer_kek_id'.
+            job_id (str): The job ID for logging purposes.
+
+        Returns:
+            str: Path to the decrypted G-code file if successful, else None.
+        """
+        logging.error(f"CryptoManager DEBUG: decrypt_gcode_file_from_job_details called for job {job_id}")
+        gcode_dek_encrypted_hex = job_details_dict.get('gcode_dek_encrypted_hex')
+        gcode_iv_hex = job_details_dict.get('gcode_iv_hex')
+        # 'user_account_id' is in job_details_dict but not directly used in this decryption path
+        # as PSEK decryption by CWS is implicit to printer, and GDEK decryption is local.
+        printer_kek_id = job_details_dict.get('printer_kek_id')
+
+        if not all([gcode_dek_encrypted_hex, gcode_iv_hex, printer_kek_id]):
+            logging.error(f"CryptoManager: Missing required crypto materials in job_details_dict for job {job_id}")
+            return None
+
+        plaintext_gcode_dek_bytes = None
+        try:
+            # Step 1: Get the plaintext G-code DEK
+            logging.error(f"CryptoManager DEBUG: Attempting to get plaintext G-code DEK for job {job_id}")
+            plaintext_gcode_dek_bytes = await self.decrypt_dek(gcode_dek_encrypted_hex, printer_kek_id)
+            if not plaintext_gcode_dek_bytes:
+                logging.error(f"CryptoManager: Failed to obtain plaintext G-code DEK for job {job_id}")
+                return None
+            logging.error(f"CryptoManager DEBUG: Obtained plaintext G-code DEK for job {job_id} (hex): {plaintext_gcode_dek_bytes.hex()}")
+
+            # Step 2: Read the encrypted G-code file
+            logging.error(f"CryptoManager DEBUG: Reading encrypted G-code file {encrypted_filepath} for job {job_id}")
+            with open(encrypted_filepath, 'rb') as f_enc:
+                encrypted_gcode_content = f_enc.read()
+            logging.error(f"CryptoManager DEBUG: Read {len(encrypted_gcode_content)} bytes from {encrypted_filepath}")
+
+            # Step 3: Decrypt the G-code content
+            logging.error(f"CryptoManager DEBUG: Attempting to decrypt G-code content for job {job_id}")
+            decrypted_gcode_bytes = await self.decrypt_gcode(
+                encrypted_gcode_content,
+                job_id=job_id,
+                dek=plaintext_gcode_dek_bytes,  # Pass as bytes
+                iv=gcode_iv_hex
+            )
+
+            if not decrypted_gcode_bytes:
+                logging.error(f"CryptoManager: Failed to decrypt G-code content for job {job_id}")
+                return None
+            logging.error(f"CryptoManager DEBUG: Successfully decrypted G-code content for job {job_id}, {len(decrypted_gcode_bytes)} bytes.")
+
+            # Step 4: Save the decrypted G-code to a new temporary file
+            base, ext = os.path.splitext(os.path.basename(encrypted_filepath))
+            # Use a more descriptive name for the decrypted file and place it in a path accessible for Klipper later
+            # Typically, Moonraker's gcode_store is used, but here we use the plugin's encrypted_path for temp storage.
+            decrypted_filename = f"{base}.decrypted{ext if ext else '.gcode'}"
+            decrypted_filepath = os.path.join(self.integration.encrypted_path, decrypted_filename)
+            
+            logging.error(f"CryptoManager DEBUG: Saving decrypted G-code for job {job_id} to {decrypted_filepath}")
+            with open(decrypted_filepath, 'wb') as f_dec:
+                f_dec.write(decrypted_gcode_bytes)
+            
+            logging.error(f"CryptoManager DEBUG: Successfully saved decrypted G-code for job {job_id} to {decrypted_filepath}")
+            return decrypted_filepath
+
+        except Exception as e:
+            logging.error(f"CryptoManager: Error in decrypt_gcode_file_from_job_details for job {job_id}: {e}")
+            import traceback
+            logging.error(f"CryptoManager: Traceback: {traceback.format_exc()}")
+            return None
         
     async def get_decryption_key(self):
         """
@@ -300,17 +373,23 @@ class CryptoManager:
                     iv_bytes = bytes.fromhex(iv) if isinstance(iv, str) else iv
                     logging.info(f"IV bytes length: {len(iv_bytes)}, IV bytes: {iv_bytes[:8]}...")
                     
-                    # Check if DEK is in hex format (not base64)
-                    is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
-                    
-                    # Convert DEK to bytes based on format
-                    if is_hex_dek:
-                        logging.info(f"DEK appears to be in hex format, converting from hex")
-                        dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
+                    # DEK is now expected to be bytes if coming from decrypt_gcode_file_from_job_details
+                    if isinstance(dek, bytes):
+                        dek_bytes = dek
+                        logging.info(f"DEK is already bytes.")
+                    elif isinstance(dek, str):
+                        # Check if DEK is in hex format (not base64)
+                        is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek)
+                        if is_hex_dek:
+                            logging.info(f"DEK appears to be in hex format, converting from hex")
+                            dek_bytes = bytes.fromhex(dek)
+                        else:
+                            # Try base64 decode as fallback
+                            logging.info(f"DEK appears to be in base64 format, converting from base64")
+                            dek_bytes = base64.b64decode(dek)
                     else:
-                        # Try base64 decode as fallback
-                        logging.info(f"DEK appears to be in base64 format, converting from base64")
-                        dek_bytes = base64.b64decode(dek) if isinstance(dek, str) else dek
+                        logging.error(f"Unsupported DEK type: {type(dek)}")
+                        return None
                     
                     logging.info(f"DEK bytes length: {len(dek_bytes)}, DEK bytes (first 8): {dek_bytes[:8]}...")
                     
