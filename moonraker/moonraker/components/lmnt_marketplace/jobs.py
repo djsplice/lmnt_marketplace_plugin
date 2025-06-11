@@ -8,11 +8,12 @@ Handles print job management for LMNT Marketplace integration:
 """
 
 import os
+import time
 import json
 import logging
 import asyncio
 import aiohttp
-import time
+import base64
 from datetime import datetime
 
 class JobManager:
@@ -713,52 +714,61 @@ class JobManager:
         
         # Get the printer token for authentication
         printer_token = self.integration.auth_manager.printer_token
-        if not printer_token:
-            logging.error("LMNT DEK: Cannot get DEK - no printer token available")
-            return None, None
-            
-        # Set up the request headers with authentication
-        headers = {
-            "Authorization": f"Bearer {printer_token}",
-            "Content-Type": "application/json"
-        }
-        
         try:
-            # Make the API request
-            start_time = time.time()
-            async with self.http_client.get(api_url, headers=headers) as response:
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                logging.info(f"LMNT DEK: Response received in {elapsed_ms}ms with status: {response.status}")
+            # Get the print job details from the API
+            response = await self.integration.make_api_request(
+                f"{self.api_url}/api/get-print-job?print_job_id={job_id}",
+                method="GET"
+            )
+            
+            if response.status != 200:
+                logging.error(f"LMNT DEK: Failed to get print job details: {response.status}")
+                return None, None
                 
-                if response.status == 200:
-                    # Parse the response JSON
-                    data = await response.json()
-                    logging.info(f"LMNT DEK: Received job details for job {job_id}")
-                    
-                    # Check if the response contains the DEK and IV
-                    gcode_dek = data.get('gcode_dek')
-                    gcode_iv = data.get('gcode_iv_hex')
-                    
-                    if gcode_dek:
-                        logging.info(f"LMNT DEK: Successfully retrieved DEK for job {job_id}")
-                        if gcode_iv:
-                            logging.info(f"LMNT DEK: Successfully retrieved IV for job {job_id}")
-                        else:
-                            logging.warning(f"LMNT DEK: Response missing gcode_iv_hex field for job {job_id}")
-                        
-                        return gcode_dek, gcode_iv
-                    else:
-                        logging.error(f"LMNT DEK: Response missing gcode_dek field for job {job_id}")
-                        
-                        # In development mode, use default values for testing
-                        if self.integration.development_mode:
-                            default_dek = "TGludXggaXMgdGhlIGJlc3Qgb3BlcmF0aW5nIHN5c3RlbSBmb3IgM0QgcHJpbnRpbmc="  # Base64 encoded test key
-                            default_iv = "000102030405060708090a0b0c0d0e0f"  # Default test IV
-                            logging.info(f"LMNT DEK: Using default DEK and IV for development mode")
-                            return default_dek, default_iv
+            data = await response.json()
+            logging.info(f"LMNT DEK: Received job details for job {job_id}")
+            
+            # Log the full response for debugging
+            logging.info(f"LMNT DEK: Full API response: {data}")
+            
+            # Check if the response contains the DEK and IV
+            encrypted_dek = data.get('gcode_dek')
+            gcode_iv = data.get('gcode_iv_hex')
+            
+            if encrypted_dek:
+                logging.info(f"LMNT DEK: Successfully retrieved encrypted DEK for job {job_id}")
+                logging.info(f"LMNT DEK: Encrypted DEK length: {len(encrypted_dek)}, DEK: {encrypted_dek[:20]}...")
+                
+                # Decrypt the DEK using the CWS service
+                logging.info(f"LMNT DEK: Decrypting DEK via CWS for job {job_id}")
+                decrypted_dek_bytes = await self.integration.crypto_manager.decrypt_dek(encrypted_dek)
+                
+                if decrypted_dek_bytes:
+                    # Convert to base64 for use with Fernet
+                    decrypted_dek = base64.b64encode(decrypted_dek_bytes).decode('utf-8')
+                    logging.info(f"LMNT DEK: Successfully decrypted DEK for job {job_id}, length: {len(decrypted_dek)}")
+                    gcode_dek = decrypted_dek
                 else:
-                    error_text = await response.text()
-                    logging.error(f"LMNT DEK: Failed to get DEK with status {response.status}: {error_text}")
+                    logging.error(f"LMNT DEK: Failed to decrypt DEK for job {job_id}")
+                    gcode_dek = None
+            else:
+                logging.error(f"LMNT DEK: Response missing gcode_dek field for job {job_id}")
+                gcode_dek = None
+                
+            if gcode_iv:
+                logging.info(f"LMNT DEK: Successfully retrieved IV for job {job_id}")
+                logging.info(f"LMNT DEK: IV length: {len(gcode_iv)}, IV: {gcode_iv}")
+            else:
+                logging.warning(f"LMNT DEK: Response missing gcode_iv_hex field for job {job_id}")
+                
+            # In development mode, use default values if DEK or IV is missing
+            if self.integration.development_mode and (gcode_dek is None or gcode_iv is None):
+                logging.info(f"LMNT DEK: Using development mode default DEK and IV")
+                # Default DEK and IV for development mode
+                gcode_dek = "TGludXggaXMgdGhlIGJlc3Qgb3BlcmF0aW5nIHN5c3RlbSBmb3IgM0QgcHJpbnRpbmc="  # Base64 encoded test key
+                gcode_iv = "000102030405060708090a0b0c0d0e0f"  # Default test IV
+                
+            return gcode_dek, gcode_iv
         except Exception as e:
             logging.error(f"LMNT DEK: Error getting DEK for job {job_id}: {str(e)}")
             import traceback

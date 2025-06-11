@@ -82,6 +82,55 @@ class CryptoManager:
             logging.error(f"Error saving encrypted PSEK: {str(e)}")
             return False
     
+    async def decrypt_dek(self, encrypted_dek_hex):
+        """
+        Decrypt the encrypted DEK using the CWS service
+        
+        Args:
+            encrypted_dek_hex (str): Encrypted DEK in hex format
+            
+        Returns:
+            bytes: Decrypted DEK if successful
+            None: If decryption failed
+        """
+        if not encrypted_dek_hex:
+            logging.error("Cannot decrypt empty DEK")
+            return None
+            
+        # Check if we have a printer token
+        if not self.integration.auth_manager.printer_token:
+            logging.error("Cannot decrypt DEK: No printer token available")
+            return None
+            
+        # Use CWS to decrypt the DEK
+        decrypt_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/ops/decrypt-data"
+        
+        try:
+            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+            payload = {"encrypted_data_hex": encrypted_dek_hex}
+            
+            logging.info(f"Sending DEK decryption request to CWS: {decrypt_url}")
+            async with self.http_client.post(decrypt_url, headers=headers, json=payload) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    decrypted_data_hex = data.get('decrypted_data_hex')
+                    
+                    if decrypted_data_hex:
+                        try:
+                            # Convert hex to bytes
+                            dek_bytes = bytes.fromhex(decrypted_data_hex)
+                            logging.info(f"Successfully decrypted DEK via CWS, length: {len(dek_bytes)}")
+                            return dek_bytes
+                        except binascii.Error as e:
+                            logging.error(f"Error decoding decrypted DEK: {str(e)}")
+                else:
+                    error_text = await response.text()
+                    logging.error(f"DEK decryption failed with status {response.status}: {error_text}")
+        except Exception as e:
+            logging.error(f"Error decrypting DEK: {str(e)}")
+            
+        return None
+        
     async def get_decryption_key(self):
         """
         Get the decryption key for GCode files by decrypting the PSEK via CWS
@@ -155,68 +204,124 @@ class CryptoManager:
             # Check if both DEK and IV are provided for custom decryption
             if dek and iv:
                 logging.info(f"Using provided DEK and IV to decrypt GCode{job_info}")
+                logging.info(f"DEK length: {len(dek) if dek else 'None'}, IV length: {len(iv) if iv else 'None'}")
                 try:
                     # Convert hex IV to bytes
                     iv_bytes = bytes.fromhex(iv) if isinstance(iv, str) else iv
+                    logging.info(f"IV bytes length: {len(iv_bytes)}, IV bytes: {iv_bytes[:8]}...")
                     
-                    # Convert DEK to bytes if needed
-                    dek_bytes = base64.b64decode(dek) if isinstance(dek, str) else dek
+                    # Check if DEK is in hex format (not base64)
+                    is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
+                    
+                    # Convert DEK to bytes based on format
+                    if is_hex_dek:
+                        logging.info(f"DEK appears to be in hex format, converting from hex")
+                        dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
+                    else:
+                        # Try base64 decode as fallback
+                        logging.info(f"DEK appears to be in base64 format, converting from base64")
+                        dek_bytes = base64.b64decode(dek) if isinstance(dek, str) else dek
+                    
+                    logging.info(f"DEK bytes length: {len(dek_bytes)}, DEK bytes (first 8): {dek_bytes[:8]}...")
                     
                     # Use AES-CBC for decryption with the provided IV
                     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
                     from cryptography.hazmat.backends import default_backend
                     
                     # Create AES cipher with the DEK and IV
+                    aes_key = dek_bytes[:32]
+                    logging.info(f"AES key length: {len(aes_key)}, using AES-CBC mode")
                     cipher = Cipher(
-                        algorithms.AES(dek_bytes[:32]),  # Use first 32 bytes as AES key
+                        algorithms.AES(aes_key),  # Use first 32 bytes as AES key
                         modes.CBC(iv_bytes),  # Use the provided IV
                         backend=default_backend()
                     )
                     
                     # Create decryptor
                     decryptor = cipher.decryptor()
+                    logging.info(f"Decryptor created, encrypted data length: {len(encrypted_data)}")
                     
                     # Decrypt the data
                     decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
+                    logging.info(f"Decryption completed, decrypted data length: {len(decrypted_data)}")
                     
                     # Remove PKCS7 padding if needed
                     from cryptography.hazmat.primitives.padding import PKCS7
                     unpadder = PKCS7(128).unpadder()
                     try:
-                        decrypted_data = unpadder.update(decrypted_data) + unpadder.finalize()
+                        padded_data = decrypted_data
+                        decrypted_data = unpadder.update(padded_data) + unpadder.finalize()
+                        logging.info(f"Unpadding successful, final data length: {len(decrypted_data)}")
                     except Exception as e:
                         logging.warning(f"Failed to unpad data, may not be padded: {str(e)}")
                         # Continue with the data as is
                         
                 except Exception as e:
+                    import traceback
                     logging.error(f"Error using custom decryption with DEK and IV{job_info}: {str(e)}")
+                    logging.error(f"Decryption error traceback: {traceback.format_exc()}")
                     logging.info(f"Falling back to Fernet decryption")
                     # Fall back to Fernet decryption
                     try:
-                        # Format DEK for Fernet
-                        key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
+                        # Check if DEK is in hex format
+                        is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
+                        
+                        # Format DEK for Fernet based on format
+                        if is_hex_dek:
+                            logging.info(f"Fernet fallback: DEK appears to be in hex format")
+                            # Convert hex to bytes then to Fernet key
+                            dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
+                            key = base64.urlsafe_b64encode(dek_bytes[:32])
+                        else:
+                            logging.info(f"Fernet fallback: DEK appears to be in base64 format")
+                            # Convert base64 to Fernet key
+                            key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
+                            
+                        logging.info(f"Fernet key length: {len(key)}, key: {key[:16]}...")
                         cipher = Fernet(key)
                         decrypted_data = cipher.decrypt(encrypted_data)
+                        logging.info(f"Fernet decryption successful, data length: {len(decrypted_data)}")
                     except Exception as inner_e:
                         logging.error(f"Fernet fallback also failed{job_info}: {str(inner_e)}")
+                        logging.error(f"Fernet error traceback: {traceback.format_exc()}")
                         # Fall back to PSEK
+                        logging.info(f"Falling back to PSEK decryption")
                         key = await self.get_decryption_key()
                         if not key:
                             logging.error(f"Failed to get PSEK{job_info}")
                             return None
+                        logging.info(f"PSEK retrieved, length: {len(key)}, attempting Fernet decryption")
                         cipher = Fernet(key)
-                        decrypted_data = cipher.decrypt(encrypted_data)
+                        try:
+                            decrypted_data = cipher.decrypt(encrypted_data)
+                            logging.info(f"PSEK decryption successful, data length: {len(decrypted_data)}")
+                        except Exception as psek_e:
+                            logging.error(f"PSEK decryption failed{job_info}: {str(psek_e)}")
+                            logging.error(f"PSEK error traceback: {traceback.format_exc()}")
+                            return None
             # If only DEK is provided (no IV), use Fernet
             elif dek:
                 logging.info(f"Using provided DEK with Fernet to decrypt GCode{job_info}")
+                logging.info(f"DEK length: {len(dek) if dek else 'None'}")
                 try:
-                    # Ensure DEK is properly formatted for Fernet
-                    if not dek.startswith(b'_') and len(dek) >= 32:
+                    # Check if DEK is in hex format
+                    is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
+                    
+                    if is_hex_dek:
+                        logging.info(f"DEK appears to be in hex format, converting from hex")
+                        # Convert hex to bytes then to Fernet key
+                        dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
+                        key = base64.urlsafe_b64encode(dek_bytes[:32])
+                    elif not dek.startswith(b'_') and len(dek) >= 32:
+                        logging.info(f"DEK appears to be in base64 format, converting to Fernet key")
                         # Convert base64 DEK to Fernet key format if needed
                         key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
                     else:
                         # Assume it's already in correct format
+                        logging.info(f"DEK appears to be in Fernet format already")
                         key = dek.encode() if isinstance(dek, str) else dek
+                        
+                    logging.info(f"Fernet key length: {len(key)}, key: {key[:16]}...")
                     
                     # Create Fernet cipher with the key
                     cipher = Fernet(key)
