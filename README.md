@@ -57,21 +57,26 @@ cws_url: https://cws.lmnt.market
 
 **Note:** The system will automatically attempt to open G-code files as encrypted first; if that fails, it falls back to standard plaintext mode. This ensures a seamless experience regardless of file type.
 
-## Flow
+## Secure Print Workflow
+
+This plugin enables a secure, end-to-end printing workflow orchestrated by the LMNT Marketplace.
+
 ```
-[Encrypted G-code Upload]
+[API: Job 'ready_to_print']
          ↓
-[Decryption & Metadata Extraction]
+[Plugin: Polls /api/poll-print-queue]
          ↓
-[Print Start → print_stats notified]
+[Plugin: Receives Job & Crypto Materials]
          ↓
-[Layer/Progress Updates in print_stats (Klipper)]
+[Plugin: Downloads Encrypted G-code via HTTPS]
          ↓
-[notify_status_update WebSocket Event]
+[Plugin: Decrypts G-code On-Printer in Memory]
          ↓
-[Clients: Mainsail, Mobileraker, Mooncord]
+[Plugin: Streams Raw G-code to Klipper]
          ↓
-[Real-Time UI Updates]
+[Klipper: Executes Print]
+         ↓
+[Plugin: Reports Status (printing, success) to API]
 ```
 
 ## Components
@@ -84,10 +89,12 @@ cws_url: https://cws.lmnt.market
 - Displays layer information on LCD via M117 commands
 
 ### LMNT Marketplace Plugin (`lmnt_marketplace_plugin.py`)
-- Manages printer registration with the LMNT Marketplace
-- Handles secure printer JWT token storage and automatic refresh via dedicated `/api/refresh-printer-token` endpoint
-- Manages printer-specific encryption keys (PSEKs) for secure G-code decryption
-- Provides integration with the Custodial Wallet Service (CWS) for key management
+- **Job Polling**: Periodically polls the `/api/poll-print-queue` endpoint of the LMNT Marketplace API to check for new, `ready_to_print` jobs.
+- **Secure G-code Download**: Downloads the encrypted G-code file over HTTPS from the URL provided by the API.
+- **On-Printer Decryption**: Manages the entire decryption process on the printer. It uses the cryptographic materials fetched from the API to decrypt the G-code just-in-time for printing, without writing the plaintext G-code to disk permanently.
+- **Klipper Integration**: Streams the decrypted, raw G-code lines directly to Klipper for printing.
+- **Status Reporting**: Sends real-time job status updates (`processing`, `printing`, `success`, `failure`) back to the Marketplace API.
+- **Authentication**: Manages printer registration and the secure storage and automatic refresh of printer JWTs.
 
 ### Klipper Modifications
 - Enhanced `virtual_sdcard.py` for encrypted and plaintext G-code file operations with automatic detection and fallback
