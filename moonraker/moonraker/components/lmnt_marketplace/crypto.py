@@ -16,6 +16,9 @@ import binascii
 import base64
 import time
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.backends import default_backend
 
 class CryptoManager:
     """
@@ -130,77 +133,90 @@ class CryptoManager:
         Returns:
             bytes: The plaintext G-code DEK as bytes if successful, else None.
         """
-        if self.integration.development_mode:
-            logging.info("CryptoManager: Using development mode fixed G-code DEK")
-            # This should be a 32-byte key for AES-256
-            return b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f'
-
-        if not encrypted_gcode_dek_hex or not kek_id:
-            logging.error("CryptoManager: decrypt_dek missing encrypted_gcode_dek_hex or kek_id.")
+        logging.info(f"CryptoManager: decrypt_dek called. Encrypted GDEK (hex, first 64): {encrypted_gcode_dek_hex[:64] if encrypted_gcode_dek_hex else 'None'}, KEK ID (first 20): {kek_id[:20] if kek_id else 'None'}")
+        
+        if not kek_id:
+            logging.error("CryptoManager: KEK ID is missing. Cannot proceed with PSEK decryption.")
+            return None
+        if not encrypted_gcode_dek_hex:
+            logging.error("CryptoManager: Encrypted G-code DEK hex is missing. Cannot proceed with DEK decryption.")
             return None
 
-        # Step 1: Get plaintext PSEK from CWS using kek_id
-        logging.info(f"CryptoManager: Attempting to get plaintext PSEK using kek_id (first 20): {kek_id[:20]}...")
-        plaintext_psek_bytes = await self._decrypt_data_via_cws(kek_id) # kek_id is already base64
-
-        if not plaintext_psek_bytes:
-            logging.error("CryptoManager: Failed to get plaintext PSEK from CWS.")
-            return None
-        logging.info(f"CryptoManager: Successfully obtained plaintext PSEK (length {len(plaintext_psek_bytes)}).")
-        # TEMPORARY DEBUG LOGGING - REMOVE AFTER DEBUGGING
-        logging.info(f"CryptoManager: Plaintext PSEK from CWS (hex): {plaintext_psek_bytes.hex()}")
-        # END TEMPORARY DEBUG LOGGING
-
-        # Step 2: Locally decrypt the G-code DEK using the plaintext PSEK
+        plaintext_psek_bytes = None # Initialize for use in exception logging
         try:
-            if len(encrypted_gcode_dek_hex) < 32:
-                logging.error(f"CryptoManager: encrypted_gcode_dek_hex is too short: {len(encrypted_gcode_dek_hex)}")
-                return None
-
-            iv_hex = encrypted_gcode_dek_hex[:32]
-            ciphertext_gcode_dek_hex = encrypted_gcode_dek_hex[32:]
-
-            iv_bytes = bytes.fromhex(iv_hex)
-            ciphertext_gcode_dek_bytes = bytes.fromhex(ciphertext_gcode_dek_hex)
+            # Step 1: Get PSEK from CWS
+            logging.info(f"CryptoManager: Attempting to decrypt KEK ID via CWS (first 20 chars): {kek_id[:20]}...")
+            plaintext_psek_bytes = await self._decrypt_data_via_cws(kek_id)
             
-            # Ensure PSEK is correct length for AES-256 (32 bytes)
-            if len(plaintext_psek_bytes) != 32:
-                logging.error(f"CryptoManager: Plaintext PSEK is not 32 bytes long (actual: {len(plaintext_psek_bytes)}). Cannot use for AES-256.")
-                # Potentially try to pad or truncate, but safer to error if exact length not met from CWS.
+            if plaintext_psek_bytes:
+                logging.info(f"CryptoManager: Successfully obtained plaintext PSEK from CWS (hex): {plaintext_psek_bytes.hex()}")
+                logging.info(f"CryptoManager: Plaintext PSEK length: {len(plaintext_psek_bytes)} bytes.")
+            else:
+                logging.error("CryptoManager: _decrypt_data_via_cws returned None or empty for PSEK.")
                 return None
 
-            logging.info(f"CryptoManager: Performing local decryption of G-code DEK. IV (hex): {iv_hex}, Ciphertext (hex, first 20): {ciphertext_gcode_dek_hex[:20]}...")
+            if len(plaintext_psek_bytes) != 32: # AES-256 key must be 32 bytes
+                logging.error(f"CryptoManager: Invalid PSEK length: {len(plaintext_psek_bytes)} bytes. Expected 32 bytes for AES-256.")
+                return None
 
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-            from cryptography.hazmat.backends import default_backend
-            from cryptography.hazmat.primitives import padding
+            logging.info(f"CryptoManager: Encrypted G-code DEK (hex, full): {encrypted_gcode_dek_hex}")
+            
+            # Step 2: Locally decrypt the G-code DEK using the plaintext PSEK
+            if len(encrypted_gcode_dek_hex) < 32:
+                logging.error(f"CryptoManager: Encrypted G-code DEK hex is too short to contain an IV: {len(encrypted_gcode_dek_hex)} chars.")
+                return None
+
+            iv_from_dek_hex = encrypted_gcode_dek_hex[:32]
+            encrypted_dek_actual_hex = encrypted_gcode_dek_hex[32:]
+
+            logging.info(f"CryptoManager: IV for DEK decryption (hex): {iv_from_dek_hex}")
+            logging.info(f"CryptoManager: Actual Encrypted DEK for decryption (hex): {encrypted_dek_actual_hex}")
+
+            if not iv_from_dek_hex or not encrypted_dek_actual_hex:
+                logging.error("CryptoManager: IV or Encrypted DEK hex is empty after splitting.")
+                return None
+
+            iv_from_dek_bytes = bytes.fromhex(iv_from_dek_hex)
+            encrypted_dek_actual_bytes = bytes.fromhex(encrypted_dek_actual_hex)
+            
+            logging.info(f"CryptoManager: IV for DEK decryption (bytes length): {len(iv_from_dek_bytes)}")
+            logging.info(f"CryptoManager: Actual Encrypted DEK for decryption (bytes length): {len(encrypted_dek_actual_bytes)}")
+
+            if len(iv_from_dek_bytes) != 16: # AES IV is 16 bytes for AES-128/192/256
+                logging.error(f"CryptoManager: Invalid IV length after hex conversion: {len(iv_from_dek_bytes)} bytes. Expected 16 bytes.")
+                return None
 
             cipher = Cipher(
-                algorithms.AES(plaintext_psek_bytes), # AES-256 key
-                modes.CBC(iv_bytes),
+                algorithms.AES(plaintext_psek_bytes),
+                modes.CBC(iv_from_dek_bytes),
                 backend=default_backend()
             )
+            logging.info("CryptoManager: AES cipher initialized for DEK decryption. Attempting decryption...")
             decryptor = cipher.decryptor()
-            decrypted_padded_gcode_dek = decryptor.update(ciphertext_gcode_dek_bytes) + decryptor.finalize()
-
-            # Remove PKCS7 padding
-            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
-            plaintext_gcode_dek_bytes = unpadder.update(decrypted_padded_gcode_dek) + unpadder.finalize()
+            decrypted_dek_padded = decryptor.update(encrypted_dek_actual_bytes) + decryptor.finalize()
+            logging.info(f"CryptoManager: AES DEK decryption complete. Padded DEK (hex, first 64 chars): {decrypted_dek_padded.hex()[:64]}")
             
-            logging.info(f"CryptoManager: Successfully decrypted G-code DEK locally (length: {len(plaintext_gcode_dek_bytes)}).")
-            return plaintext_gcode_dek_bytes
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+            logging.info("CryptoManager: PKCS7 unpadder initialized for DEK. Attempting unpadding...")
+            decrypted_dek_unpadded = unpadder.update(decrypted_dek_padded) + unpadder.finalize()
+            logging.info(f"CryptoManager: Successfully decrypted and unpadded G-code DEK. Plaintext DEK (hex): {decrypted_dek_unpadded.hex()}")
+            logging.info(f"CryptoManager: Plaintext G-code DEK length: {len(decrypted_dek_unpadded)} bytes.")
+            
+            return decrypted_dek_unpadded
 
         except binascii.Error as e:
-            logging.error(f"CryptoManager: Hex decoding error during local G-code DEK decryption: {e}")
+            logging.error(f"CryptoManager: Hex decoding error during G-code DEK decryption: {e}. PSEK used (hex): {plaintext_psek_bytes.hex() if plaintext_psek_bytes else 'Not available'}")
+            import traceback
+            logging.error(traceback.format_exc())
             return None
-        except ValueError as ve: # Often for padding errors
-            logging.error(f"CryptoManager: ValueError during local G-code DEK decryption (likely padding): {ve}")
-            import traceback # Ensure traceback is imported here if not already in scope
+        except ValueError as ve: 
+            logging.error(f"CryptoManager: ValueError during G-code DEK decryption (often padding or key error): {ve}. PSEK used (hex): {plaintext_psek_bytes.hex() if plaintext_psek_bytes else 'Not available'}")
+            import traceback
             logging.error(traceback.format_exc())
             return None
         except Exception as e:
-            import traceback # Ensure traceback is imported here if not already in scope
-            logging.error(f"CryptoManager: Local G-code DEK decryption failed: {e}")
+            logging.error(f"CryptoManager: General failure during G-code DEK decryption: {e}. PSEK used (hex): {plaintext_psek_bytes.hex() if plaintext_psek_bytes else 'Not available'}")
+            import traceback
             logging.error(traceback.format_exc())
             return None
 
