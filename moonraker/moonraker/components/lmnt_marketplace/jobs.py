@@ -763,70 +763,61 @@ class JobManager:
         
         return False
     
-    async def _monitor_print_progress(self, job):
-        """
-        Monitor print progress and update status
+    async def _monitor_print_progress(self, job_id):
+        """Monitor print progress and update status"""
+        logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
         
-        Args:
-            job (dict): Job information
-        """
-        job_id = job.get('id')
+        # Get printer status component. This object's attributes will be updated by Moonraker.
+        print_stats_obj = self.klippy_apis.printer.get_object('print_stats')
         
-        if not job_id:
-            logging.error("Cannot monitor print progress: Missing job ID")
+        # Check if the print_stats object was successfully retrieved
+        if print_stats_obj is None:
+            logging.error(f"LMNT MONITOR: Failed to get 'print_stats' object from Klippy. Cannot monitor job {job_id}.")
+            await self._update_job_status(job_id, 'failed', 'Internal error: Failed to get print_stats object.')
+            self._finalize_job(job_id, success=False)
             return
-        
-        try:
-            # Wait for print to start
-            await asyncio.sleep(5)
-            
-            # Get metadata for layer count
-            metadata = self.integration.gcode_manager.current_metadata
-            total_layers = metadata.get('layer_count', 0)
-            
-            # Monitor until print is complete or failed
-            while True:
-                try:
-                    # Query print stats
-                    result = await self.klippy_apis.query_objects({'objects': {'print_stats': None}})
-                    stats = result.get('print_stats', {})
-                    state = stats.get('state', '')
-                    
-                    # Get progress information
-                    progress = stats.get('progress', 0) * 100  # Convert to percentage
-                    current_layer = int(total_layers * stats.get('progress', 0)) if total_layers > 0 else 0
-                    duration = stats.get('print_duration', 0)
-                    
-                    # Update job progress
-                    await self._update_job_progress(job_id, progress, current_layer, total_layers, duration)
-                    
-                    # Check if print is complete or failed
-                    if state == 'complete':
-                        await self._update_job_status(job_id, 'completed', 'Print completed successfully')
-                        self.current_print_job = None
-                        break
-                    elif state in ('error', 'cancelled'):
-                        await self._update_job_status(job_id, 'failed', f'Print {state}')
-                        self.current_print_job = None
-                        break
-                    elif state not in ('printing', 'paused'):
-                        logging.info(f"Print state changed to {state}, continuing to monitor")
-                    
-                except Exception as e:
-                    logging.error(f"Error querying print stats: {str(e)}")
+
+        while self.current_print_job and self.current_print_job.get('id') == job_id:
+            try:
+                # Access the state directly from the print_stats_obj attributes
+                current_state = print_stats_obj.state  # e.g., 'printing', 'complete', 'error'
                 
-                # Wait before next update
-                await asyncio.sleep(10)
-        
-        except asyncio.CancelledError:
-            logging.info(f"Print monitoring for job {job_id} cancelled")
-        except Exception as e:
-            logging.error(f"Error monitoring print progress for job {job_id}: {str(e)}")
-            
-            # Ensure job status is updated even on error
-            if self.current_print_job and self.current_print_job.get('id') == job_id:
+                logging.info(f"LMNT MONITOR: Current print state for job {job_id}: {current_state}")
+                
+                if current_state == 'complete':
+                    logging.info(f"LMNT MONITOR: Print job {job_id} completed successfully")
+                    await self._update_job_status(job_id, 'success', 'Print completed successfully')
+                    self._finalize_job(job_id, success=True) # Ensure success=True is passed
+                    break 
+                elif current_state == 'error' or current_state == 'cancelled':
+                    # Try to get an error message if available from print_stats_obj
+                    message = print_stats_obj.message if hasattr(print_stats_obj, 'message') else f'Print failed with state: {current_state}'
+                    logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {current_state}. Message: {message}")
+                    await self._update_job_status(job_id, 'failed', message)
+                    self._finalize_job(job_id, success=False)
+                    break
+                elif current_state == 'printing' or current_state == 'paused':
+                    # Still ongoing, log progress if desired (e.g., print_stats_obj.progress)
+                    # progress_percent = int(print_stats_obj.progress * 100) if hasattr(print_stats_obj, 'progress') and print_stats_obj.progress is not None else 0
+                    # logging.info(f"LMNT MONITOR: Job {job_id} progress: {progress_percent}%")
+                    pass # Continue monitoring
+                else:
+                    # Handle unexpected states
+                    logging.warning(f"LMNT MONITOR: Job {job_id} in unexpected state: {current_state}. Will continue monitoring for now.")
+
+
+                # Wait before next check
+                await asyncio.sleep(self.integration.config.getint('monitor_interval', 5)) # Check every 5 seconds (configurable)
+                
+            except Exception as e:
+                logging.error(f"LMNT MONITOR: Error during print stats monitoring for job {job_id}: {str(e)}")
+                import traceback
+                logging.error(f"LMNT MONITOR: Exception traceback: {traceback.format_exc()}")
+                
+                # If an error occurs during monitoring, assume failure for now.
                 await self._update_job_status(job_id, 'failed', f'Error monitoring print: {str(e)}')
-                self.current_print_job = None
+                self._finalize_job(job_id, success=False)
+                break
     
     async def _update_job_progress(self, job_id, progress, current_layer, total_layers, duration):
         """
