@@ -14,6 +14,7 @@ import asyncio
 import aiohttp
 import binascii
 import base64
+import time
 from cryptography.fernet import Fernet, InvalidToken
 
 class CryptoManager:
@@ -106,28 +107,49 @@ class CryptoManager:
         decrypt_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/ops/decrypt-data"
         
         try:
+            # Log CWS URL and token info
+            logging.info(f"CWS URL: {self.integration.cws_url}")
+            logging.info(f"API Version: {self.integration.api_version}")
+            logging.info(f"Decrypt URL: {decrypt_url}")
+            logging.info(f"Token available: {bool(self.integration.auth_manager.printer_token)}")
+            logging.info(f"Token length: {len(self.integration.auth_manager.printer_token) if self.integration.auth_manager.printer_token else 'N/A'}")
+            
+            # Log payload details
+            logging.info(f"Encrypted DEK hex length: {len(encrypted_dek_hex)}")
+            logging.info(f"Encrypted DEK hex: {encrypted_dek_hex[:20]}...{encrypted_dek_hex[-20:]}")
+            
             headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
             payload = {"encrypted_data_hex": encrypted_dek_hex}
             
             logging.info(f"Sending DEK decryption request to CWS: {decrypt_url}")
+            start_time = time.time()
             async with self.http_client.post(decrypt_url, headers=headers, json=payload) as response:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                logging.info(f"CWS response received in {elapsed_ms}ms with status: {response.status}")
+                
                 if response.status == 200:
                     data = await response.json()
+                    logging.info(f"CWS response data keys: {list(data.keys()) if data else 'None'}")
                     decrypted_data_hex = data.get('decrypted_data_hex')
                     
                     if decrypted_data_hex:
+                        logging.info(f"Decrypted DEK hex received, length: {len(decrypted_data_hex)}")
                         try:
                             # Convert hex to bytes
                             dek_bytes = bytes.fromhex(decrypted_data_hex)
-                            logging.info(f"Successfully decrypted DEK via CWS, length: {len(dek_bytes)}")
+                            logging.info(f"Successfully decrypted DEK via CWS, length: {len(dek_bytes)}, first 8 bytes: {dek_bytes[:8].hex()}")
                             return dek_bytes
                         except binascii.Error as e:
                             logging.error(f"Error decoding decrypted DEK: {str(e)}")
+                    else:
+                        logging.error("CWS response missing decrypted_data_hex field")
                 else:
                     error_text = await response.text()
                     logging.error(f"DEK decryption failed with status {response.status}: {error_text}")
         except Exception as e:
             logging.error(f"Error decrypting DEK: {str(e)}")
+            import traceback
+            logging.error(f"Exception traceback: {traceback.format_exc()}")
             
         return None
         
