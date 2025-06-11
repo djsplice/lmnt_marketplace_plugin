@@ -147,6 +147,9 @@ class CryptoManager:
             logging.error("CryptoManager: Failed to get plaintext PSEK from CWS.")
             return None
         logging.info(f"CryptoManager: Successfully obtained plaintext PSEK (length {len(plaintext_psek_bytes)}).")
+        # TEMPORARY DEBUG LOGGING - REMOVE AFTER DEBUGGING
+        logging.info(f"CryptoManager: Plaintext PSEK from CWS (hex): {plaintext_psek_bytes.hex()}")
+        # END TEMPORARY DEBUG LOGGING
 
         # Step 2: Locally decrypt the G-code DEK using the plaintext PSEK
         try:
@@ -190,8 +193,13 @@ class CryptoManager:
         except binascii.Error as e:
             logging.error(f"CryptoManager: Hex decoding error during local G-code DEK decryption: {e}")
             return None
+        except ValueError as ve: # Often for padding errors
+            logging.error(f"CryptoManager: ValueError during local G-code DEK decryption (likely padding): {ve}")
+            import traceback # Ensure traceback is imported here if not already in scope
+            logging.error(traceback.format_exc())
+            return None
         except Exception as e:
-            import traceback
+            import traceback # Ensure traceback is imported here if not already in scope
             logging.error(f"CryptoManager: Local G-code DEK decryption failed: {e}")
             logging.error(traceback.format_exc())
             return None
