@@ -39,12 +39,23 @@ class LmntMarketplaceIntegration:
         self.klippy_apis = None
         self.api_version = "1.0.0"
         
-        # Set up paths for tokens and data storage
+        # Set up paths for tokens, keys, and data storage
         data_path = self.server.get_app_args()['data_path']
-        self.tokens_path = os.path.join(data_path, "lmnt_marketplace", "tokens")
+        lmnt_data_path = os.path.join(data_path, "lmnt_marketplace")
+        self.tokens_path = os.path.join(lmnt_data_path, "tokens")
+        self.keys_path = os.path.join(lmnt_data_path, "keys")
+        self.encrypted_path = os.path.join(lmnt_data_path, "encrypted")
+        self.metadata_path = os.path.join(lmnt_data_path, "metadata")
+        self.thumbnails_path = os.path.join(lmnt_data_path, "thumbnails")
         
         # Create directories if they don't exist
         os.makedirs(self.tokens_path, exist_ok=True)
+        os.makedirs(self.keys_path, exist_ok=True)
+        os.makedirs(self.encrypted_path, exist_ok=True)
+        os.makedirs(self.metadata_path, exist_ok=True)
+        os.makedirs(self.thumbnails_path, exist_ok=True)
+        
+        logging.info(f"LMNT data paths: tokens={self.tokens_path}, keys={self.keys_path}, encrypted={self.encrypted_path}, metadata={self.metadata_path}, thumbnails={self.thumbnails_path}")
         
         # API endpoints
         # Use configurable endpoints with defaults
@@ -54,10 +65,14 @@ class LmntMarketplaceIntegration:
         # Debug mode for verbose logging (default: False)
         self.debug_mode = self.config.getboolean('debug_mode', False)
         
+        # Development mode for testing features (default: False)
+        self.development_mode = self.config.getboolean('development_mode', False)
+        
         # Log the configured endpoints
         logging.info(f"LMNT Marketplace API URL: {self.marketplace_url}")
         logging.info(f"LMNT CWS URL: {self.cws_url}")
         logging.info(f"Debug mode: {self.debug_mode}")
+        logging.info(f"Development mode: {self.development_mode}")
         
         # Configure logging level
         if self.debug_mode:
@@ -109,8 +124,10 @@ class LmntMarketplaceIntegration:
         """
         Start background tasks for the integration
         """
-        # Start job checking task
-        self.server.register_event_loop_callback(self.job_manager.job_check_task)
+        # Start job polling directly
+        logging.info("LMNT Integration: Directly starting job polling")
+        self.job_manager.setup_job_polling()
+        logging.info("LMNT Integration: Job polling setup completed")
     
     async def handle_klippy_shutdown(self):
         """

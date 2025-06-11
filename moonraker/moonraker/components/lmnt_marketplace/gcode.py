@@ -36,12 +36,12 @@ class GCodeManager:
         self.klippy_apis = klippy_apis
         self.http_client = http_client
     
-    async def stream_decrypted_gcode(self, encrypted_filepath, job_id=None):
+    async def stream_decrypted_gcode(self, decrypted_filepath, job_id=None):
         """
-        Decrypt GCode in memory and stream it line-by-line to Klipper
+        Stream a decrypted GCode file line-by-line to Klipper
         
         Args:
-            encrypted_filepath (str): Path to the encrypted GCode file
+            decrypted_filepath (str): Path to the decrypted GCode file
             job_id (str, optional): Job ID for tracking and logging
             
         Returns:
@@ -52,18 +52,16 @@ class GCodeManager:
         job_info = f" for job {job_id}" if job_id else ""
         
         try:
-            logging.info(f"Starting to stream decrypted GCode{job_info}")
+            logging.info(f"Starting to stream GCode from {decrypted_filepath}{job_info}")
             
-            # Read encrypted file
-            with open(encrypted_filepath, 'rb') as f:
-                encrypted_gcode = f.read()
+            # Read decrypted file
+            with open(decrypted_filepath, 'r', encoding='utf-8') as f:
+                decrypted_gcode_content = f.read()
             
-            # Decrypt GCode in memory
-            decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(
-                encrypted_gcode, job_id)
-            
+            decrypted_gcode = decrypted_gcode_content # Assign to the variable used by splitlines
+
             if not decrypted_gcode:
-                logging.error(f"Failed to decrypt GCode{job_info}")
+                logging.error(f"GCode file {decrypted_filepath} is empty or could not be read{job_info}")
                 return None
             
             # Split into lines
@@ -76,8 +74,8 @@ class GCodeManager:
             # Extract and save thumbnails
             await self._extract_and_save_thumbnails(lines, job_id)
             
-            # Prepare Klipper for streaming
-            await self.klippy_apis.run_gcode("CLEAR_STREAM_OUTPUT")
+            # Prepare Klipper for streaming (CLEAR_STREAM_OUTPUT removed as it caused 'Unknown command')
+            # await self.klippy_apis.run_gcode("CLEAR_STREAM_OUTPUT") 
             
             # Stream GCode line-by-line
             line_count = 0
@@ -88,11 +86,8 @@ class GCodeManager:
                 if not line or line.strip().startswith(';'):
                     continue
                 
-                # Escape double quotes in the line
-                escaped_line = line.replace('"', '\\"')
-                
-                # Send the line to Klipper
-                await self.klippy_apis.run_gcode(f'STREAM_GCODE_LINE LINE="{escaped_line}"')
+                # Send the line to Klipper (removed double quote escaping)
+                await self.klippy_apis.run_gcode(line)
                 line_count += 1
                 
                 # Log progress periodically
@@ -101,9 +96,7 @@ class GCodeManager:
                     rate = line_count / elapsed if elapsed > 0 else 0
                     logging.info(f"Streamed {line_count} lines{job_info} ({rate:.1f} lines/sec)")
             
-            # Signal end of streaming
-            await self.klippy_apis.run_gcode("STREAM_GCODE_LINE")
-            
+            # End of streaming is implicit when G-code lines run out.
             # Log completion
             elapsed = time.time() - start_time
             rate = line_count / elapsed if elapsed > 0 else 0
@@ -301,10 +294,12 @@ class GCodeManager:
             return None
         
         job_id = job_id or self.current_job_id
-        metadata_file = os.path.join(self.integration.base_path, f"job_{job_id}_metadata.json")
+        
+        # Ensure metadata directory exists (handled by integration.py when it creates self.integration.metadata_path)
+        metadata_file = os.path.join(self.integration.metadata_path, f"job_{job_id}_metadata.json")
         
         try:
-            with open(metadata_file, 'w') as f:
+            with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(self.current_metadata, f, indent=2)
             
             logging.info(f"Saved metadata for job {job_id}: {metadata_file}")
@@ -312,7 +307,7 @@ class GCodeManager:
         except Exception as e:
             logging.error(f"Error saving metadata for job {job_id}: {str(e)}")
             return None
-    
+
     def load_metadata(self, job_id):
         """
         Load job metadata from disk
@@ -328,17 +323,17 @@ class GCodeManager:
             logging.error("Cannot load metadata: No job ID provided")
             return None
         
-        metadata_file = os.path.join(self.integration.base_path, f"job_{job_id}_metadata.json")
+        metadata_file = os.path.join(self.integration.metadata_path, f"job_{job_id}_metadata.json")
         
         try:
             if os.path.exists(metadata_file):
-                with open(metadata_file, 'r') as f:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
                 
-                logging.info(f"Loaded metadata for job {job_id}")
+                logging.info(f"Loaded metadata for job {job_id}: {metadata_file}")
                 return metadata
             else:
-                logging.warning(f"No metadata file found for job {job_id}")
+                logging.warning(f"No metadata file found for job {job_id}: {metadata_file}")
                 return None
         except Exception as e:
             logging.error(f"Error loading metadata for job {job_id}: {str(e)}")
