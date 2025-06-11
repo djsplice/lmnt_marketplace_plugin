@@ -704,7 +704,7 @@ class JobManager:
             tuple: (Base64-encoded DEK, hex-encoded IV) if successful
             (None, None): If DEK could not be obtained
         """
-        api_url = f"{self.api_url}/api/get-print-job?print_job_id={job_id}"
+        api_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
         logging.info(f"LMNT DEK: Getting DEK from: {api_url}")
         
         # Get the printer token for authentication
