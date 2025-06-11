@@ -735,7 +735,18 @@ class JobManager:
         
         try:
             headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
-            payload = {"status": status}
+            
+            # Map plugin status to API-compliant status
+            api_status = status
+            if status == 'completed':
+                api_status = 'success'
+            elif status in ['failed', 'cancelled']:
+                api_status = 'failure'
+            elif status == 'printing': # Printing is a form of processing
+                api_status = 'processing'
+            # 'processing' maps to 'processing'
+            
+            payload = {"status": api_status}
             
             if message:
                 payload["message"] = message

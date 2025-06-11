@@ -90,7 +90,7 @@ class GCodeManager:
                 escaped_line = line.replace('"', '\\"')
                 
                 # Send the line to Klipper
-                await self.klippy_apis.run_gcode(f'STREAM_GCODE_LINE LINE="{escaped_line}"')
+                await self.klippy_apis.run_gcode(escaped_line)
                 line_count += 1
                 
                 # Log progress periodically
@@ -99,9 +99,7 @@ class GCodeManager:
                     rate = line_count / elapsed if elapsed > 0 else 0
                     logging.info(f"Streamed {line_count} lines{job_info} ({rate:.1f} lines/sec)")
             
-            # Signal end of streaming
-            await self.klippy_apis.run_gcode("STREAM_GCODE_LINE")
-            
+            # End of streaming is implicit when G-code lines run out.
             # Log completion
             elapsed = time.time() - start_time
             rate = line_count / elapsed if elapsed > 0 else 0
@@ -299,10 +297,12 @@ class GCodeManager:
             return None
         
         job_id = job_id or self.current_job_id
-        metadata_file = os.path.join(self.integration.base_path, f"job_{job_id}_metadata.json")
+        
+        # Ensure metadata directory exists (handled by integration.py when it creates self.integration.metadata_path)
+        metadata_file = os.path.join(self.integration.metadata_path, f"job_{job_id}_metadata.json")
         
         try:
-            with open(metadata_file, 'w') as f:
+            with open(metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(self.current_metadata, f, indent=2)
             
             logging.info(f"Saved metadata for job {job_id}: {metadata_file}")
@@ -310,7 +310,7 @@ class GCodeManager:
         except Exception as e:
             logging.error(f"Error saving metadata for job {job_id}: {str(e)}")
             return None
-    
+
     def load_metadata(self, job_id):
         """
         Load job metadata from disk
@@ -326,17 +326,17 @@ class GCodeManager:
             logging.error("Cannot load metadata: No job ID provided")
             return None
         
-        metadata_file = os.path.join(self.integration.base_path, f"job_{job_id}_metadata.json")
+        metadata_file = os.path.join(self.integration.metadata_path, f"job_{job_id}_metadata.json")
         
         try:
             if os.path.exists(metadata_file):
-                with open(metadata_file, 'r') as f:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
                 
-                logging.info(f"Loaded metadata for job {job_id}")
+                logging.info(f"Loaded metadata for job {job_id}: {metadata_file}")
                 return metadata
             else:
-                logging.warning(f"No metadata file found for job {job_id}")
+                logging.warning(f"No metadata file found for job {job_id}: {metadata_file}")
                 return None
         except Exception as e:
             logging.error(f"Error loading metadata for job {job_id}: {str(e)}")
