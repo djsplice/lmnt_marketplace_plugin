@@ -120,13 +120,18 @@ class CryptoManager:
             
             headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
             
-            # Convert hex to base64 for CWS API which expects base64 input
+            # CWS API expects dataToDecrypt as a base64 string
             try:
+                # Log the original encrypted DEK hex
+                logging.info(f"Original encrypted DEK hex: {encrypted_dek_hex[:10]}...{encrypted_dek_hex[-10:]} (length: {len(encrypted_dek_hex)})")
+                
                 # First convert hex to bytes
                 encrypted_dek_bytes = bytes.fromhex(encrypted_dek_hex)
+                logging.info(f"Converted to bytes, length: {len(encrypted_dek_bytes)}, first 8 bytes: {encrypted_dek_bytes[:8].hex()}")
+                
                 # Then convert bytes to base64
                 encrypted_dek_base64 = base64.b64encode(encrypted_dek_bytes).decode('utf-8')
-                logging.info(f"Converted encrypted DEK from hex to base64, length: {len(encrypted_dek_base64)}")
+                logging.info(f"Converted to base64: {encrypted_dek_base64[:10]}...{encrypted_dek_base64[-10:]} (length: {len(encrypted_dek_base64)})")
             except Exception as e:
                 logging.error(f"Error converting encrypted DEK from hex to base64: {str(e)}")
                 return None
@@ -141,21 +146,31 @@ class CryptoManager:
                 logging.info(f"CWS response received in {elapsed_ms}ms with status: {response.status}")
                 
                 if response.status == 200:
-                    data = await response.json()
-                    logging.info(f"CWS response data keys: {list(data.keys()) if data else 'None'}")
-                    decrypted_data_base64 = data.get('decryptedData')  # CWS returns base64 in 'decryptedData' field
-                    
-                    if decrypted_data_base64:
-                        logging.info(f"Decrypted DEK base64 received, length: {len(decrypted_data_base64)}")
-                        try:
-                            # Convert base64 to bytes
-                            dek_bytes = base64.b64decode(decrypted_data_base64)
-                            logging.info(f"Successfully decrypted DEK via CWS, length: {len(dek_bytes)}, first 8 bytes: {dek_bytes[:8].hex()}")
-                            return dek_bytes
-                        except binascii.Error as e:
-                            logging.error(f"Error decoding decrypted DEK from base64: {str(e)}")
-                    else:
-                        logging.error("CWS response missing decryptedData field")
+                    try:
+                        data = await response.json()
+                        logging.info(f"CWS response data keys: {list(data.keys()) if data else 'None'}")
+                        logging.info(f"CWS full response: {data}")
+                        
+                        decrypted_data_base64 = data.get('decryptedData')  # CWS returns base64 in 'decryptedData' field
+                        
+                        if decrypted_data_base64:
+                            logging.info(f"Decrypted DEK base64 received: {decrypted_data_base64[:10]}...{decrypted_data_base64[-10:]} (length: {len(decrypted_data_base64)})")
+                            try:
+                                # Convert base64 to bytes
+                                dek_bytes = base64.b64decode(decrypted_data_base64)
+                                logging.info(f"Successfully decrypted DEK via CWS, length: {len(dek_bytes)}, first 8 bytes: {dek_bytes[:8].hex()}")
+                                return dek_bytes
+                            except binascii.Error as e:
+                                logging.error(f"Error decoding decrypted DEK from base64: {str(e)}")
+                                return None
+                        else:
+                            logging.error("CWS response missing decryptedData field")
+                            return None
+                    except Exception as e:
+                        logging.error(f"Error parsing CWS response: {str(e)}")
+                        response_text = await response.text()
+                        logging.error(f"Raw response: {response_text}")
+                        return None
                 else:
                     error_text = await response.text()
                     logging.error(f"DEK decryption failed with status {response.status}: {error_text}")
