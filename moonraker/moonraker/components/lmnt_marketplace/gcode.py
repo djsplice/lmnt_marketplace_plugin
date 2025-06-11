@@ -74,8 +74,8 @@ class GCodeManager:
             # Extract and save thumbnails
             await self._extract_and_save_thumbnails(lines, job_id)
             
-            # Prepare Klipper for streaming
-            await self.klippy_apis.run_gcode("CLEAR_STREAM_OUTPUT")
+            # Prepare Klipper for streaming (CLEAR_STREAM_OUTPUT removed as it caused 'Unknown command')
+            # await self.klippy_apis.run_gcode("CLEAR_STREAM_OUTPUT") 
             
             # Stream GCode line-by-line
             line_count = 0
@@ -86,11 +86,8 @@ class GCodeManager:
                 if not line or line.strip().startswith(';'):
                     continue
                 
-                # Escape double quotes in the line
-                escaped_line = line.replace('"', '\\"')
-                
-                # Send the line to Klipper
-                await self.klippy_apis.run_gcode(escaped_line)
+                # Send the line to Klipper (removed double quote escaping)
+                await self.klippy_apis.run_gcode(line)
                 line_count += 1
                 
                 # Log progress periodically
