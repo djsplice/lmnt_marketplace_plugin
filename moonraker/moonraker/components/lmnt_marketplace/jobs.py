@@ -696,8 +696,8 @@ class JobManager:
             await self._update_job_status(job_id, 'printing', 'Print started')
             
             # Start monitoring print progress
-            logging.info(f"LMNT PRINT: Starting print progress monitoring for job {job_id}")
-            asyncio.create_task(self._monitor_print_progress(job))
+            logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
+            asyncio.create_task(self._monitor_print_progress(job_id))
             
             logging.info(f"LMNT PRINT: Successfully started print for job {job_id}")
             return True
@@ -767,8 +767,10 @@ class JobManager:
         """Monitor print progress and update status"""
         logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
         
+        # Get the printer object from the server components
+        printer_obj = self.integration.server.lookup_component('printer')
         # Get printer status component. This object's attributes will be updated by Moonraker.
-        print_stats_obj = self.klippy_apis.printer.get_object('print_stats')
+        print_stats_obj = printer_obj.get_object('print_stats')
         
         # Check if the print_stats object was successfully retrieved
         if print_stats_obj is None:
