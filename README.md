@@ -201,7 +201,12 @@ Response:
 
 ### Printer Registration
 
-Endpoint to register a printer with the LMNT Marketplace.
+Endpoint to register a printer with the LMNT Marketplace. This will register the printer with the LMNT Marketplace and return a printer JWT and ability to use a PSEK key by calling the Custodial Wallet Service (CWS) to decrypt the PSEK given the locally stored kek_id.
+
+When a printer is registered using the /machine/lmnt_marketplace/register_printer endpoint, the API returns the following key-related material:
+
+1. `printer_token`: This is a JSON Web Token (JWT) that is unique to the registered printer. The printer uses this token to authenticate itself for future communications with the LMNT Marketplace API, such as polling for print jobs or refreshing its token.
+2. `kek_id`: This field contains an identifier for a Key Encryption Key (KEK). The KEK is managed by the Custodial Wallet Service (CWS) and is used to encrypt the printer's unique Printer-Specific Encryption Key (PSEK). The printer doesn't receive the plaintext PSEK directly during registration. Instead, it receives this kek_id. Later, when the printer needs to decrypt a G-code file, it will interact with the CWS, using its printer_token for authentication and providing the kek_id (and the encrypted G-code DEK) to have the CWS perform the necessary decryption operations to retrieve the G-code DEK.
 
 ```
 POST /machine/lmnt_marketplace/register_printer
@@ -229,6 +234,18 @@ Response:
   "printer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "token_expires": "2025-07-10T06:18:50.357Z"
 }
+```
+
+Full Example
+```
+curl -X POST http://mainsail.lmnt.local/machine/lmnt_marketplace/register_printer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJjbG91ZC1jdXN0b2RpYWwtd2FsbGV0LXNlcnZpY2UiLCJzdWIiOiIwZTllMDRkZi0xNTNhLTQyMDItYjRhOS1kZDNlNWM2YjI2ZDUiLCJhdWQiOiJjbG91ZC1jdXN0b2RpYWwtd2FsbGV0LWNsaWVudCIsImlhdCI6MTc0OTUzNTI1MCwibmJmIjoxNzQ5NTM1MjUwLCJ1c2VySWQiOiIwZTllMDRkZi0xNTNhLTQyMDItYjRhOS1kZDNlNWM2YjI2ZDUiLCJlbWFpbCI6InB1cmNoYXNlcl8xNzQ5Mzk3MjAxOTAxQGV4YW1wbGUuY29tIiwibmFtZSI6bnVsbCwiYWNjb3VudFR5cGUiOiJsb2NhbCIsImhlZGVyYUFjY291bnRJZCI6bnVsbCwid2FsbGV0SWQiOm51bGwsImV2bUFkZHJlc3MiOm51bGwsIndhbGxldENyZWF0ZWQiOm51bGwsInJvbGVzIjpbXSwicGVybWlzc2lvbnMiOltdLCJzY29wZSI6bnVsbCwicHJvZmlsZVZlcnNpb24iOjEsImxhc3RMb2dpbiI6bnVsbCwiZGV2aWNlSWQiOm51bGwsImV4cCI6MTc0OTUzODg1MH0.uaY3Am7CZ1-fbtTOh_60J-SFz_Ydu94iiu84oUhhS88",
+    "printer_name": "NachoPostmanTestPrinterz",
+    "manufacturer": "NachoCorp",
+    "model": "ZeroG-Mercury"
+  }'
 ```
 
 ### Printer Token Refresh
