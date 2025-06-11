@@ -36,12 +36,12 @@ class GCodeManager:
         self.klippy_apis = klippy_apis
         self.http_client = http_client
     
-    async def stream_decrypted_gcode(self, encrypted_filepath, job_id=None):
+    async def stream_decrypted_gcode(self, decrypted_filepath, job_id=None):
         """
-        Decrypt GCode in memory and stream it line-by-line to Klipper
+        Stream a decrypted GCode file line-by-line to Klipper
         
         Args:
-            encrypted_filepath (str): Path to the encrypted GCode file
+            decrypted_filepath (str): Path to the decrypted GCode file
             job_id (str, optional): Job ID for tracking and logging
             
         Returns:
@@ -52,18 +52,16 @@ class GCodeManager:
         job_info = f" for job {job_id}" if job_id else ""
         
         try:
-            logging.info(f"Starting to stream decrypted GCode{job_info}")
+            logging.info(f"Starting to stream GCode from {decrypted_filepath}{job_info}")
             
-            # Read encrypted file
-            with open(encrypted_filepath, 'rb') as f:
-                encrypted_gcode = f.read()
+            # Read decrypted file
+            with open(decrypted_filepath, 'r', encoding='utf-8') as f:
+                decrypted_gcode_content = f.read()
             
-            # Decrypt GCode in memory
-            decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(
-                encrypted_gcode, job_id)
-            
+            decrypted_gcode = decrypted_gcode_content # Assign to the variable used by splitlines
+
             if not decrypted_gcode:
-                logging.error(f"Failed to decrypt GCode{job_info}")
+                logging.error(f"GCode file {decrypted_filepath} is empty or could not be read{job_info}")
                 return None
             
             # Split into lines
