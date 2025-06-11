@@ -104,7 +104,7 @@ class CryptoManager:
             return None
             
         # Use CWS to decrypt the DEK
-        decrypt_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/ops/decrypt-data"
+        decrypt_url = f"{self.integration.cws_url}/ops/decrypt-data"
         
         try:
             # Log CWS URL and token info
