@@ -61,10 +61,14 @@ class LmntMarketplaceIntegration:
         # Debug mode for verbose logging (default: False)
         self.debug_mode = self.config.getboolean('debug_mode', False)
         
+        # Development mode for testing features (default: False)
+        self.development_mode = self.config.getboolean('development_mode', False)
+        
         # Log the configured endpoints
         logging.info(f"LMNT Marketplace API URL: {self.marketplace_url}")
         logging.info(f"LMNT CWS URL: {self.cws_url}")
         logging.info(f"Debug mode: {self.debug_mode}")
+        logging.info(f"Development mode: {self.development_mode}")
         
         # Configure logging level
         if self.debug_mode:

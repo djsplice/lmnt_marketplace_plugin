@@ -528,20 +528,58 @@ class JobManager:
                         logging.info(f"LMNT DOWNLOAD: Direct download failed, trying API proxy")
                         proxy_url = f"{self.integration.marketplace_url}/api/print/download-gcode?print_job_id={job_id}"
                         
-                        async with self.http_client.get(proxy_url, headers=headers) as proxy_response:
-                            if proxy_response.status == 200:
-                                content = await proxy_response.read()
-                                content_size = len(content)
-                                logging.info(f"LMNT DOWNLOAD: Downloaded {content_size} bytes via API proxy")
-                                
-                                with open(encrypted_filepath, 'wb') as f:
-                                    f.write(content)
-                                
-                                logging.info(f"LMNT DOWNLOAD: Saved encrypted GCode to {encrypted_filepath}")
-                                return encrypted_filepath
-                            else:
-                                proxy_error = await proxy_response.text()
-                                logging.error(f"LMNT DOWNLOAD: API proxy download failed: {proxy_error}")
+                        try:
+                            async with self.http_client.get(proxy_url, headers=headers) as proxy_response:
+                                if proxy_response.status == 200:
+                                    content = await proxy_response.read()
+                                    content_size = len(content)
+                                    logging.info(f"LMNT DOWNLOAD: Downloaded {content_size} bytes via API proxy")
+                                    
+                                    with open(encrypted_filepath, 'wb') as f:
+                                        f.write(content)
+                                    
+                                    logging.info(f"LMNT DOWNLOAD: Saved encrypted GCode to {encrypted_filepath}")
+                                    return encrypted_filepath
+                                else:
+                                    proxy_error = await proxy_response.text()
+                                    logging.error(f"LMNT DOWNLOAD: API proxy download failed: {proxy_error}")
+                        except Exception as e:
+                            logging.error(f"LMNT DOWNLOAD: API proxy exception: {str(e)}")
+                            
+                        # If API proxy fails, try to get the job details to get the DEK and download directly from GCS
+                        logging.info(f"LMNT DOWNLOAD: Trying to get job details to download directly")
+                        job_details_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
+                        
+                        try:
+                            async with self.http_client.get(job_details_url, headers=headers) as details_response:
+                                if details_response.status == 200:
+                                    job_details = await details_response.json()
+                                    direct_url = job_details.get('gcode_file_url')
+                                    
+                                    if direct_url:
+                                        logging.info(f"LMNT DOWNLOAD: Got direct URL from job details: {direct_url}")
+                                        
+                                        # Try direct download from GCS URL if possible
+                                        if direct_url.startswith('https://storage.googleapis.com/'):
+                                            async with self.http_client.get(direct_url) as direct_response:
+                                                if direct_response.status == 200:
+                                                    content = await direct_response.read()
+                                                    content_size = len(content)
+                                                    logging.info(f"LMNT DOWNLOAD: Downloaded {content_size} bytes directly from GCS")
+                                                    
+                                                    with open(encrypted_filepath, 'wb') as f:
+                                                        f.write(content)
+                                                    
+                                                    logging.info(f"LMNT DOWNLOAD: Saved encrypted GCode to {encrypted_filepath}")
+                                                    return encrypted_filepath
+                                                else:
+                                                    direct_error = await direct_response.text()
+                                                    logging.error(f"LMNT DOWNLOAD: Direct GCS download failed: {direct_error}")
+                                else:
+                                    details_error = await details_response.text()
+                                    logging.error(f"LMNT DOWNLOAD: Failed to get job details: {details_error}")
+                        except Exception as e:
+                            logging.error(f"LMNT DOWNLOAD: Job details exception: {str(e)}")
         except Exception as e:
             logging.error(f"LMNT DOWNLOAD: Error downloading GCode for job {job_id}: {str(e)}")
             import traceback
@@ -575,15 +613,19 @@ class JobManager:
                 logging.error(f"LMNT PRINT: Cannot start print for job {job_id}: Printer not ready")
                 return False
             
-            # Get the DEK for decryption
-            logging.info(f"LMNT PRINT: Getting DEK for job {job_id}")
-            gcode_dek = await self._get_gcode_dek(job_id)
+            # Get the DEK and IV for decryption
+            logging.info(f"LMNT PRINT: Getting DEK and IV for job {job_id}")
+            gcode_dek, gcode_iv = await self._get_gcode_dek(job_id)
             
             if not gcode_dek:
                 logging.error(f"LMNT PRINT: Failed to get DEK for job {job_id}")
                 return False
                 
             logging.info(f"LMNT PRINT: Successfully retrieved DEK for job {job_id}")
+            if gcode_iv:
+                logging.info(f"LMNT PRINT: Successfully retrieved IV for job {job_id}")
+            else:
+                logging.warning(f"LMNT PRINT: No IV available for job {job_id}, will attempt decryption without it")
             
             # Home the printer if needed
             try:
@@ -606,8 +648,10 @@ class JobManager:
             
             # Decrypt the data
             try:
-                logging.info(f"LMNT PRINT: Decrypting G-code data")
-                decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(encrypted_data, job_id)
+                logging.info(f"LMNT PRINT: Decrypting G-code data using DEK")
+                # Pass the DEK and IV to the decrypt_gcode method
+                decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(
+                    encrypted_data, job_id, dek=gcode_dek, iv=gcode_iv)
                 
                 if not decrypted_gcode:
                     logging.error(f"LMNT PRINT: Failed to decrypt G-code for job {job_id}")
@@ -650,18 +694,18 @@ class JobManager:
     
     async def _get_gcode_dek(self, job_id):
         """
-        Get the encrypted GCode DEK for a job from the marketplace API
+        Get the encrypted GCode DEK and IV for a job from the marketplace API
         
         Args:
             job_id (str): Job ID to get DEK for
             
         Returns:
-            str: Base64-encoded DEK if successful
-            None: If DEK could not be obtained
+            tuple: (Base64-encoded DEK, hex-encoded IV) if successful
+            (None, None): If DEK could not be obtained
         """
         if not job_id:
             logging.error("LMNT DEK: Cannot get DEK - missing job ID")
-            return None
+            return None, None
             
         # Get the API endpoint URL - use query parameter, not path parameter
         api_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
@@ -671,7 +715,7 @@ class JobManager:
         printer_token = self.integration.auth_manager.printer_token
         if not printer_token:
             logging.error("LMNT DEK: Cannot get DEK - no printer token available")
-            return None
+            return None, None
             
         # Set up the request headers with authentication
         headers = {
@@ -691,13 +735,27 @@ class JobManager:
                     data = await response.json()
                     logging.info(f"LMNT DEK: Received job details for job {job_id}")
                     
-                    # Check if the response contains the DEK
+                    # Check if the response contains the DEK and IV
                     gcode_dek = data.get('gcode_dek')
+                    gcode_iv = data.get('gcode_iv_hex')
+                    
                     if gcode_dek:
                         logging.info(f"LMNT DEK: Successfully retrieved DEK for job {job_id}")
-                        return gcode_dek
+                        if gcode_iv:
+                            logging.info(f"LMNT DEK: Successfully retrieved IV for job {job_id}")
+                        else:
+                            logging.warning(f"LMNT DEK: Response missing gcode_iv_hex field for job {job_id}")
+                        
+                        return gcode_dek, gcode_iv
                     else:
                         logging.error(f"LMNT DEK: Response missing gcode_dek field for job {job_id}")
+                        
+                        # In development mode, use default values for testing
+                        if self.integration.development_mode:
+                            default_dek = "TGludXggaXMgdGhlIGJlc3Qgb3BlcmF0aW5nIHN5c3RlbSBmb3IgM0QgcHJpbnRpbmc="  # Base64 encoded test key
+                            default_iv = "000102030405060708090a0b0c0d0e0f"  # Default test IV
+                            logging.info(f"LMNT DEK: Using default DEK and IV for development mode")
+                            return default_dek, default_iv
                 else:
                     error_text = await response.text()
                     logging.error(f"LMNT DEK: Failed to get DEK with status {response.status}: {error_text}")
@@ -705,9 +763,10 @@ class JobManager:
             logging.error(f"LMNT DEK: Error getting DEK for job {job_id}: {str(e)}")
             import traceback
             logging.error(f"LMNT DEK: Exception traceback: {traceback.format_exc()}")
+            return None, None
         
-        return None
-        
+        return None, None
+    
     async def _update_job_status(self, job_id, status, message=None):
         """
         Update job status in the marketplace

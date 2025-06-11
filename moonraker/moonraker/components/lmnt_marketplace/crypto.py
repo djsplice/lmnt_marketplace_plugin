@@ -135,13 +135,15 @@ class CryptoManager:
         
         return None
     
-    async def decrypt_gcode(self, encrypted_data, job_id=None):
+    async def decrypt_gcode(self, encrypted_data, job_id=None, dek=None, iv=None):
         """
-        Decrypt GCode data using PSEK
+        Decrypt GCode data using DEK or PSEK
         
         Args:
             encrypted_data (bytes): Encrypted GCode data
             job_id (str, optional): Job ID for logging purposes
+            dek (str, optional): Data Encryption Key in base64 format
+            iv (str, optional): Initialization Vector in hex format
             
         Returns:
             str: Decrypted GCode as string if successful
@@ -150,17 +152,99 @@ class CryptoManager:
         job_info = f" for job {job_id}" if job_id else ""
         
         try:
-            # Get decryption key (PSEK)
-            key = await self.get_decryption_key()
-            if not key:
-                logging.error(f"Failed to get decryption key{job_info}")
-                return None
-            
-            # Create Fernet cipher with the key
-            cipher = Fernet(key)
-            
-            # Decrypt the data
-            decrypted_data = cipher.decrypt(encrypted_data)
+            # Check if both DEK and IV are provided for custom decryption
+            if dek and iv:
+                logging.info(f"Using provided DEK and IV to decrypt GCode{job_info}")
+                try:
+                    # Convert hex IV to bytes
+                    iv_bytes = bytes.fromhex(iv) if isinstance(iv, str) else iv
+                    
+                    # Convert DEK to bytes if needed
+                    dek_bytes = base64.b64decode(dek) if isinstance(dek, str) else dek
+                    
+                    # Use AES-CBC for decryption with the provided IV
+                    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                    from cryptography.hazmat.backends import default_backend
+                    
+                    # Create AES cipher with the DEK and IV
+                    cipher = Cipher(
+                        algorithms.AES(dek_bytes[:32]),  # Use first 32 bytes as AES key
+                        modes.CBC(iv_bytes),  # Use the provided IV
+                        backend=default_backend()
+                    )
+                    
+                    # Create decryptor
+                    decryptor = cipher.decryptor()
+                    
+                    # Decrypt the data
+                    decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
+                    
+                    # Remove PKCS7 padding if needed
+                    from cryptography.hazmat.primitives.padding import PKCS7
+                    unpadder = PKCS7(128).unpadder()
+                    try:
+                        decrypted_data = unpadder.update(decrypted_data) + unpadder.finalize()
+                    except Exception as e:
+                        logging.warning(f"Failed to unpad data, may not be padded: {str(e)}")
+                        # Continue with the data as is
+                        
+                except Exception as e:
+                    logging.error(f"Error using custom decryption with DEK and IV{job_info}: {str(e)}")
+                    logging.info(f"Falling back to Fernet decryption")
+                    # Fall back to Fernet decryption
+                    try:
+                        # Format DEK for Fernet
+                        key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
+                        cipher = Fernet(key)
+                        decrypted_data = cipher.decrypt(encrypted_data)
+                    except Exception as inner_e:
+                        logging.error(f"Fernet fallback also failed{job_info}: {str(inner_e)}")
+                        # Fall back to PSEK
+                        key = await self.get_decryption_key()
+                        if not key:
+                            logging.error(f"Failed to get PSEK{job_info}")
+                            return None
+                        cipher = Fernet(key)
+                        decrypted_data = cipher.decrypt(encrypted_data)
+            # If only DEK is provided (no IV), use Fernet
+            elif dek:
+                logging.info(f"Using provided DEK with Fernet to decrypt GCode{job_info}")
+                try:
+                    # Ensure DEK is properly formatted for Fernet
+                    if not dek.startswith(b'_') and len(dek) >= 32:
+                        # Convert base64 DEK to Fernet key format if needed
+                        key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
+                    else:
+                        # Assume it's already in correct format
+                        key = dek.encode() if isinstance(dek, str) else dek
+                    
+                    # Create Fernet cipher with the key
+                    cipher = Fernet(key)
+                    
+                    # Decrypt the data
+                    decrypted_data = cipher.decrypt(encrypted_data)
+                except Exception as e:
+                    logging.error(f"Error formatting DEK{job_info}: {str(e)}")
+                    # Fall back to PSEK
+                    key = await self.get_decryption_key()
+                    if not key:
+                        logging.error(f"Failed to get PSEK{job_info}")
+                        return None
+                    cipher = Fernet(key)
+                    decrypted_data = cipher.decrypt(encrypted_data)
+            else:
+                # Get decryption key (PSEK)
+                key = await self.get_decryption_key()
+                
+                if not key:
+                    logging.error(f"Failed to get decryption key{job_info}")
+                    return None
+                
+                # Create Fernet cipher with the key
+                cipher = Fernet(key)
+                
+                # Decrypt the data
+                decrypted_data = cipher.decrypt(encrypted_data)
             
             # Convert to string
             decrypted_gcode = decrypted_data.decode('utf-8')
