@@ -435,7 +435,7 @@ class AuthManager:
                         data = json.loads(response_text)
                         printer_token = data.get('printer_token')  # Changed from 'token' to 'printer_token'
                         printer_kek_id = data.get('kek_id') # Get the KEK ID
-                        retrieved_printer_id = data.get('printer_id') # Get the printer_id
+                        retrieved_printer_id = data.get('id') # Get the printer_id (changed from 'printer_id')
 
                         if printer_token and printer_kek_id and retrieved_printer_id:
                             self.printer_id = retrieved_printer_id # Set instance printer_id
