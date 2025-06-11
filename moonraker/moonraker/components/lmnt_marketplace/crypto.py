@@ -283,7 +283,7 @@ class CryptoManager:
             
             logging.error(f"CryptoManager DEBUG: Saving decrypted G-code for job {job_id} to {decrypted_filepath}")
             with open(decrypted_filepath, 'wb') as f_dec:
-                f_dec.write(decrypted_gcode_bytes)
+                f_dec.write(decrypted_gcode_bytes.encode('utf-8'))
             
             logging.error(f"CryptoManager DEBUG: Successfully saved decrypted G-code for job {job_id} to {decrypted_filepath}")
             return decrypted_filepath
