@@ -33,6 +33,7 @@ class AuthManager:
         self.token_expiry = None
         self.user_token = None  # Temporary storage for user JWT during registration
         self.printer_id = None
+        self.printer_kek_id = None # Added to store printer_kek_id
         self.klippy_apis = None
         
         # Create HTTP client for API calls
@@ -114,7 +115,7 @@ class AuthManager:
         )
     
     def load_printer_token(self):
-        """Load saved printer token from secure storage"""
+        """Load saved printer token and kek_id from secure storage"""
         logging.info("LMNT AUTH: Loading printer token from storage")
         token_file = os.path.join(self.integration.tokens_path, "printer_token.json")
         logging.info(f"LMNT AUTH: Looking for token file at {token_file}")
@@ -124,20 +125,25 @@ class AuthManager:
                 with open(token_file, 'r') as f:
                     data = json.load(f)
                     self.printer_token = data.get('token')
+                    self.printer_kek_id = data.get('printer_kek_id') # Load printer_kek_id
                     expiry_str = data.get('expiry')
                     if expiry_str:
                         self.token_expiry = datetime.fromisoformat(expiry_str)
                     
-                    # Extract printer_id from token if available
-                    if self.printer_token:
+                    if self.printer_token and self.printer_kek_id:
                         self.printer_id = self._get_printer_id_from_token()
                         if self.printer_id:
-                            logging.info(f"LMNT AUTH: Loaded printer token for printer ID: {self.printer_id}")
+                            logging.info(f"LMNT AUTH: Loaded printer token and KEK ID for printer ID: {self.printer_id}")
+                            # Optionally log kek_id if in debug mode
+                            if self.integration.debug_mode:
+                                logging.debug(f"LMNT AUTH: Loaded KEK ID: {self.printer_kek_id[:10]}...") # Log first 10 chars for brevity
                             return True
                         else:
                             logging.error("LMNT AUTH: Token loaded but no printer ID found in token")
+                    elif self.printer_token:
+                        logging.warning("LMNT AUTH: Token loaded but KEK ID missing from storage.")
                     else:
-                        logging.error("LMNT AUTH: Token file exists but contains no token")
+                        logging.error("LMNT AUTH: Token file exists but contains no token or KEK ID")
             except (json.JSONDecodeError, IOError) as e:
                 logging.error(f"LMNT AUTH: Error loading printer token: {str(e)}")
         else:
@@ -147,8 +153,8 @@ class AuthManager:
         logging.info("LMNT AUTH: Use the /machine/lmnt_marketplace/register_printer endpoint to register this printer")
         return False
     
-    def save_printer_token(self, token, expiry):
-        """Save printer token to secure storage"""
+    def save_printer_token(self, token, expiry, printer_kek_id=None):
+        """Save printer token and kek_id to secure storage"""
         if not token:
             logging.error("Cannot save empty printer token")
             return False
@@ -158,12 +164,14 @@ class AuthManager:
             with open(token_file, 'w') as f:
                 json.dump({
                     'token': token,
-                    'expiry': expiry.isoformat() if expiry else None
+                    'expiry': expiry.isoformat() if expiry else None,
+                    'printer_kek_id': printer_kek_id # Save printer_kek_id
                 }, f)
             
             # Update in-memory token
             self.printer_token = token
             self.token_expiry = expiry
+            self.printer_kek_id = printer_kek_id # Store in memory
             
             # Extract printer_id from token
             self.printer_id = self._get_printer_id_from_token()
@@ -426,7 +434,12 @@ class AuthManager:
                     try:
                         data = json.loads(response_text)
                         printer_token = data.get('printer_token')  # Changed from 'token' to 'printer_token'
-                        if printer_token:
+                        printer_kek_id = data.get('kek_id') # Get the KEK ID
+                        retrieved_printer_id = data.get('printer_id') # Get the printer_id
+
+                        if printer_token and printer_kek_id and retrieved_printer_id:
+                            self.printer_id = retrieved_printer_id # Set instance printer_id
+
                             # Save token and expiry
                             token_expires = data.get('token_expires')
                             expiry = None
@@ -436,9 +449,12 @@ class AuthManager:
                                 except ValueError:
                                     logging.warning(f"Could not parse token expiry: {token_expires}")
                             
-                            self.save_printer_token(printer_token, expiry)
-                            logging.info("Printer token saved successfully")
-                            self.printer_id = data.get('id')
+                            self.save_printer_token(printer_token, expiry, printer_kek_id=printer_kek_id)
+                            logging.info(f"Printer registered successfully with ID: {self.printer_id}, KEK ID stored.")
+                        else:
+                            missing = [item for item, val in [('printer_token', printer_token), ('kek_id', printer_kek_id), ('printer_id', retrieved_printer_id)] if not val]
+                            logging.error(f"Printer registration response missing critical fields: {', '.join(missing)}. Full response: {data}")
+                            # self.printer_id is not set here if registration is incomplete
                         return data
                     except json.JSONDecodeError:
                         logging.warning("Response was not valid JSON, returning as text")

@@ -747,8 +747,12 @@ class JobManager:
                     logging.info(f"LMNT DEK: Encrypted DEK length: {len(encrypted_dek)}, DEK: {encrypted_dek[:20]}...")
                     
                     # Decrypt the DEK using the CWS service
-                    logging.info(f"LMNT DEK: Decrypting DEK via CWS for job {job_id}")
-                    decrypted_dek_bytes = await self.integration.crypto_manager.decrypt_dek(encrypted_dek)
+                    printer_kek_id = self.integration.auth_manager.printer_kek_id
+                    if not printer_kek_id:
+                        logging.error(f"LMNT DEK: Cannot decrypt DEK for job {job_id} - printer_kek_id not found in AuthManager.")
+                        return None, None
+                    logging.info(f"LMNT DEK: Decrypting DEK via CWS for job {job_id} using KEK ID: {printer_kek_id[:10]}...")
+                    decrypted_dek_bytes = await self.integration.crypto_manager.decrypt_dek(encrypted_dek, kek_id=printer_kek_id)
                     
                     if decrypted_dek_bytes:
                         # Convert to base64 for use with Fernet

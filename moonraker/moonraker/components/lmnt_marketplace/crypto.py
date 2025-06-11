@@ -83,112 +83,119 @@ class CryptoManager:
             logging.error(f"Error saving encrypted PSEK: {str(e)}")
             return False
     
-    async def decrypt_dek(self, encrypted_dek):
-        """
-        Decrypt the encrypted DEK using the CWS service
-        
-        Args:
-            encrypted_dek (str): Encrypted DEK from the marketplace API
-            
-        Returns:
-            bytes: Decrypted DEK if successful
-            None: If decryption failed
-        """
-        # In development mode, use a fixed DEK for testing
-        if self.integration.development_mode:
-            logging.info("Using development mode fixed DEK")
-            # Return a fixed 32-byte key for development mode
-            return b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f'
-        if not encrypted_dek:
-            logging.error("Cannot decrypt empty DEK")
-            return None
-            
-        # Check if we have a printer token
+    async def _decrypt_data_via_cws(self, data_to_decrypt_b64):
+        """Helper to call CWS /ops/decrypt-data endpoint."""
         if not self.integration.auth_manager.printer_token:
-            logging.error("Cannot decrypt DEK: No printer token available")
+            logging.error("CWS Decryption: No printer token available.")
             return None
-            
-        # Use CWS to decrypt the DEK
+
         decrypt_url = f"{self.integration.cws_url}/ops/decrypt-data"
-        
+        headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+        payload = {"dataToDecrypt": data_to_decrypt_b64}
+
+        logging.info(f"CWS Decryption: Sending request to {decrypt_url} with data (first 20): {data_to_decrypt_b64[:20]}...")
         try:
-            # Log CWS URL and token info
-            logging.info(f"CWS URL: {self.integration.cws_url}")
-            logging.info(f"API Version: {self.integration.api_version}")
-            logging.info(f"Decrypt URL: {decrypt_url}")
-            logging.info(f"Token available: {bool(self.integration.auth_manager.printer_token)}")
-            logging.info(f"Token length: {len(self.integration.auth_manager.printer_token) if self.integration.auth_manager.printer_token else 'N/A'}")
-            
-            # Log payload details
-            logging.info(f"Encrypted DEK length: {len(encrypted_dek)}")
-            logging.info(f"Encrypted DEK (first/last 20 chars): {encrypted_dek[:20]}...{encrypted_dek[-20:]}")
-            
-            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
-            
-            # Determine if the encrypted DEK is in hex format or already in base64 format
-            is_hex_format = all(c in '0123456789abcdefABCDEF' for c in encrypted_dek)
-            
-            # CWS API expects dataToDecrypt as a base64 string
-            try:
-                if is_hex_format:
-                    logging.info("Encrypted DEK appears to be in hex format, converting to base64")
-                    # Convert hex to bytes then to base64
-                    encrypted_dek_bytes = bytes.fromhex(encrypted_dek)
-                    encrypted_dek_base64 = base64.b64encode(encrypted_dek_bytes).decode('utf-8')
-                else:
-                    logging.info("Encrypted DEK appears to already be in base64 format or another format")
-                    # Assume it's already in base64 format
-                    encrypted_dek_base64 = encrypted_dek
-                    
-                logging.info(f"DEK to send to CWS (first/last 10 chars): {encrypted_dek_base64[:10]}...{encrypted_dek_base64[-10:]} (length: {len(encrypted_dek_base64)})")
-            except Exception as e:
-                logging.error(f"Error processing encrypted DEK: {str(e)}")
-                return None
-                
-            # CWS API expects 'dataToDecrypt' field with base64 data
-            payload = {"dataToDecrypt": encrypted_dek_base64}
-            
-            logging.info(f"Sending DEK decryption request to CWS: {decrypt_url}")
-            start_time = time.time()
             async with self.http_client.post(decrypt_url, headers=headers, json=payload) as response:
-                elapsed_ms = int((time.time() - start_time) * 1000)
-                logging.info(f"CWS response received in {elapsed_ms}ms with status: {response.status}")
-                
+                logging.info(f"CWS Decryption: Response status {response.status}")
                 if response.status == 200:
-                    try:
-                        data = await response.json()
-                        logging.info(f"CWS response data keys: {list(data.keys()) if data else 'None'}")
-                        logging.info(f"CWS full response: {data}")
-                        
-                        decrypted_data_base64 = data.get('decryptedData')  # CWS returns base64 in 'decryptedData' field
-                        
-                        if decrypted_data_base64:
-                            logging.info(f"Decrypted DEK base64 received: {decrypted_data_base64[:10]}...{decrypted_data_base64[-10:]} (length: {len(decrypted_data_base64)})")
-                            try:
-                                # Convert base64 to bytes
-                                dek_bytes = base64.b64decode(decrypted_data_base64)
-                                logging.info(f"Successfully decrypted DEK via CWS, length: {len(dek_bytes)}, first 8 bytes: {dek_bytes[:8].hex()}")
-                                return dek_bytes
-                            except binascii.Error as e:
-                                logging.error(f"Error decoding decrypted DEK from base64: {str(e)}")
-                                return None
-                        else:
-                            logging.error("CWS response missing decryptedData field")
+                    resp_json = await response.json()
+                    decrypted_b64 = resp_json.get('decryptedData')
+                    if decrypted_b64:
+                        try:
+                            return base64.b64decode(decrypted_b64)
+                        except binascii.Error as e:
+                            logging.error(f"CWS Decryption: Error decoding base64 response: {e}")
                             return None
-                    except Exception as e:
-                        logging.error(f"Error parsing CWS response: {str(e)}")
-                        response_text = await response.text()
-                        logging.error(f"Raw response: {response_text}")
+                    else:
+                        logging.error("CWS Decryption: 'decryptedData' missing in response.")
                         return None
                 else:
                     error_text = await response.text()
-                    logging.error(f"DEK decryption failed with status {response.status}: {error_text}")
+                    logging.error(f"CWS Decryption: Failed. Status: {response.status}, Body: {error_text}")
+                    return None
         except Exception as e:
-            logging.error(f"Error decrypting DEK: {str(e)}")
-            import traceback
-            logging.error(f"Exception traceback: {traceback.format_exc()}")
+            logging.error(f"CWS Decryption: Request exception: {e}")
+            return None
+
+    async def decrypt_dek(self, encrypted_gcode_dek_hex, kek_id):
+        """
+        Decrypts the G-code DEK.
+        Step 1: Use kek_id (encrypted PSEK) to get plaintext PSEK from CWS.
+        Step 2: Use plaintext PSEK to locally decrypt encrypted_gcode_dek_hex.
+
+        Args:
+            encrypted_gcode_dek_hex (str): Hex string of IV + Slicer-encrypted G-code DEK.
+            kek_id (str): The printer_kek_id (base64 CWS-encrypted PSEK).
             
-        return None
+        Returns:
+            bytes: The plaintext G-code DEK as bytes if successful, else None.
+        """
+        if self.integration.development_mode:
+            logging.info("CryptoManager: Using development mode fixed G-code DEK")
+            # This should be a 32-byte key for AES-256
+            return b'\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f'
+
+        if not encrypted_gcode_dek_hex or not kek_id:
+            logging.error("CryptoManager: decrypt_dek missing encrypted_gcode_dek_hex or kek_id.")
+            return None
+
+        # Step 1: Get plaintext PSEK from CWS using kek_id
+        logging.info(f"CryptoManager: Attempting to get plaintext PSEK using kek_id (first 20): {kek_id[:20]}...")
+        plaintext_psek_bytes = await self._decrypt_data_via_cws(kek_id) # kek_id is already base64
+
+        if not plaintext_psek_bytes:
+            logging.error("CryptoManager: Failed to get plaintext PSEK from CWS.")
+            return None
+        logging.info(f"CryptoManager: Successfully obtained plaintext PSEK (length {len(plaintext_psek_bytes)}).")
+
+        # Step 2: Locally decrypt the G-code DEK using the plaintext PSEK
+        try:
+            if len(encrypted_gcode_dek_hex) < 32:
+                logging.error(f"CryptoManager: encrypted_gcode_dek_hex is too short: {len(encrypted_gcode_dek_hex)}")
+                return None
+
+            iv_hex = encrypted_gcode_dek_hex[:32]
+            ciphertext_gcode_dek_hex = encrypted_gcode_dek_hex[32:]
+
+            iv_bytes = bytes.fromhex(iv_hex)
+            ciphertext_gcode_dek_bytes = bytes.fromhex(ciphertext_gcode_dek_hex)
+            
+            # Ensure PSEK is correct length for AES-256 (32 bytes)
+            if len(plaintext_psek_bytes) != 32:
+                logging.error(f"CryptoManager: Plaintext PSEK is not 32 bytes long (actual: {len(plaintext_psek_bytes)}). Cannot use for AES-256.")
+                # Potentially try to pad or truncate, but safer to error if exact length not met from CWS.
+                return None
+
+            logging.info(f"CryptoManager: Performing local decryption of G-code DEK. IV (hex): {iv_hex}, Ciphertext (hex, first 20): {ciphertext_gcode_dek_hex[:20]}...")
+
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+            from cryptography.hazmat.primitives import padding
+
+            cipher = Cipher(
+                algorithms.AES(plaintext_psek_bytes), # AES-256 key
+                modes.CBC(iv_bytes),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            decrypted_padded_gcode_dek = decryptor.update(ciphertext_gcode_dek_bytes) + decryptor.finalize()
+
+            # Remove PKCS7 padding
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+            plaintext_gcode_dek_bytes = unpadder.update(decrypted_padded_gcode_dek) + unpadder.finalize()
+            
+            logging.info(f"CryptoManager: Successfully decrypted G-code DEK locally (length: {len(plaintext_gcode_dek_bytes)}).")
+            return plaintext_gcode_dek_bytes
+
+        except binascii.Error as e:
+            logging.error(f"CryptoManager: Hex decoding error during local G-code DEK decryption: {e}")
+            return None
+        except Exception as e:
+            import traceback
+            logging.error(f"CryptoManager: Local G-code DEK decryption failed: {e}")
+            logging.error(traceback.format_exc())
+            return None
+
         
     async def get_decryption_key(self):
         """
