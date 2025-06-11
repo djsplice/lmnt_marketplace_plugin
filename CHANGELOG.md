@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.5] - 2025-06-12
+
+### Fixed
+- **G-code Streaming**: Resolved the 'Unknown command:"STREAM_GCODE_LINE"' error by sending raw G-code lines directly to Klipper, enabling successful printing.
+- **Print Status Reporting**: Fixed a bug where print jobs were incorrectly marked as 'failure'. Status now correctly transitions from 'processing' to 'printing' and 'success'.
+- **On-Printer Decryption**: Corrected a file-write error (`TypeError: a bytes-like object is required, not 'str'`) by ensuring the decrypted G-code was written to a temporary file in binary mode (`'wb'`).
+
+### Changed
+- **End-to-End Workflow**: The secure print workflow is now fully operational. The plugin can successfully poll for a job, download the encrypted G-code, decrypt it on the printer, and stream it to Klipper for printing.
+
 ## [1.0.4] - 2025-06-09
 ### Added
 - Advanced component tests for comprehensive local testing of GCode and Job managers
