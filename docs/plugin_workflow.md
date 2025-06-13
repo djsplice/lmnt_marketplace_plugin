@@ -5,22 +5,26 @@ This document outlines the operational flow of the LMNT Marketplace Plugin (`lmn
 ## 1. Overview
 
 The LMNT Marketplace Plugin is designed to run on a 3D printer (typically alongside Klipper and Moonraker). Its primary responsibilities are:
-- Authenticating with the LMNT Marketplace.
+- Authenticating and Registering with the LMNT Marketplace.
 - Fetching authorized print jobs.
 - Securely retrieving and decrypting G-code for printing.
 - Streaming G-code to Klipper for execution.
 - Reporting the final print status back to the marketplace.
 
-## 2. Authentication
+## 2. Printer Registration
 
-Before the plugin can fetch print jobs, the printer must be registered with the LMNT Marketplace, and the plugin must be configured with authentication credentials.
+Each printer is associated with a marketplace User ID, and it must be registered before it can fetch print jobs. There are several API andpoints that run on the LMNT Marketplace Plugin that are intended to be used with a local web interface, likely integrated into Mainsail/Fluidd that help facilitate the User Login and Printer Registration process.
 
-1.  **Printer Registration (Prerequisite)**: 
-    *   A printer is registered with the Marketplace API (e.g., via an endpoint like `/api/register-printer`). During this process, a unique plaintext Printer-Specific Encryption Key (PSEK) is generated for the printer.
+1.  **User Login (Prerequisite)**: 
+    *   The user logs into the marketplace using their email and password by posting to the Printers API endpoint via a Moonraker RPC method at `POST /machine/lmnt_marketplace/login_user`.
+    *   The Printers API coordinates with the Marketplace API to authenticate the user, retrieve their account information, and return their User JWT.
+    *   This JWT should be used to call the /api/register-printer endpoint with the printer's name and description.
+
+2.  **Printer Registration (Prerequisite)**: 
+    *   A printer is registered with the Marketplace API via the `/api/register-printer` endpoint. During this process, a unique plaintext Printer-Specific Encryption Key (PSEK) is generated for the printer. The plugin provides an API endpoint which is exposed as an Moonraker RPC method: `POST /machine/lmnt_marketplace/register_printer` - so it can be called as such: `http://mainsail.lmnt.local/machine/lmnt_marketplace/register_printer`.
     *   The Marketplace API coordinates with the Cloud Custodial Wallet Service (CWS) to encrypt this plaintext PSEK. This typically involves the Marketplace API calling CWS's `POST /ops/encrypt-data` endpoint with the plaintext PSEK. CWS encrypts it using its internal `masterPrinterKekCwsId` and returns the KEK-encrypted PSEK.
     *   The Marketplace API then returns this KEK-encrypted PSEK and a long-lived printer-specific JSON Web Token (JWT) to the printer/plugin.
     *   The plugin stores this KEK-encrypted PSEK (let's refer to it as `kek_encrypted_psek_for_gcode_encryption`) and the JWT locally and securely.
-    *   The plugin may provide a local API endpoint (e.g., `/machine/lmnt_marketplace/register_printer`) to facilitate this registration process from the printer's interface, which in turn calls the Marketplace API.
     *   Future enhancements may include a web interface integrated with Mainsail/Fluidd for easier user interaction.
 
 2.  **Plugin Authentication**: 
