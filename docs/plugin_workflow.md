@@ -21,7 +21,7 @@ Each printer is associated with a marketplace User ID, and it must be registered
     *   This JWT should be used to call the /api/register-printer endpoint with the printer's name and description.
 
 2.  **Printer Registration (Prerequisite)**: 
-    *   A printer is registered with the Marketplace API via the `/api/register-printer` endpoint. During this process, a unique plaintext Printer-Specific Encryption Key (PSEK) is generated for the printer. The plugin provides an API endpoint which is exposed as an Moonraker RPC method: `POST /machine/lmnt_marketplace/register_printer` - so it can be called as such: `http://mainsail.lmnt.local/machine/lmnt_marketplace/register_printer`.
+    *   A printer is registered with the Marketplace API via the `/api/register-printer` endpoint. The plugin provides an API endpoint which is exposed as an Moonraker RPC method: `POST /machine/lmnt_marketplace/register_printer` - so it can be called as such: `http://mainsail.lmnt.local/machine/lmnt_marketplace/register_printer`. During this process, a unique plaintext Printer-Specific Encryption Key (PSEK) is generated for the printer. 
     *   The Marketplace API coordinates with the Cloud Custodial Wallet Service (CWS) to encrypt this plaintext PSEK. This typically involves the Marketplace API calling CWS's `POST /ops/encrypt-data` endpoint with the plaintext PSEK. CWS encrypts it using its internal `masterPrinterKekCwsId` and returns the KEK-encrypted PSEK.
     *   The Marketplace API then returns this KEK-encrypted PSEK and a long-lived printer-specific JSON Web Token (JWT) to the printer/plugin.
     *   The plugin stores this KEK-encrypted PSEK (let's refer to it as `kek_encrypted_psek_for_gcode_encryption`) and the JWT locally and securely.
