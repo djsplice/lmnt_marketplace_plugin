@@ -55,9 +55,9 @@
   - If `print_immediately: true`, trigger `/api/print`.
   - Return `{ status, purchase_id, gcode_file_url, print_profile_id, slicing_fee, ttl_hours }`.
 - [ ] Implement `/api/prepare-status` endpoint to return job status (`pending`, `in_progress`, `completed`, `printing`).
-- [ ] Implement `prepareModel` function to manage slicing via Pub/Sub and OrcaSlicer.
-- [ ] Test Prepare Workflow on local [[Hedera]] instance using CURL, including ~60s latency.
-- [ ] Verify [[HCS]] logs, GCS storage, and database updates.
+- [x] Implement `prepareModel` function to manage slicing via Pub/Sub and OrcaSlicer.
+- [x] Test Prepare Workflow on local [[Hedera]] instance using CURL, including ~60s latency.
+- [x] Verify [[HCS]] logs, GCS storage, and database updates.
 
 **Specification**:
 - **API**:
@@ -96,36 +96,36 @@
 **Objective**: Authorize and stream encrypted G-code to the Enthusiast’s printer for in-memory decryption and printing, triggered immediately post-slicing or manually from queued jobs, with status feedback and minimal unencrypted G-code exposure.
 
 **Tasks**:
-- [ ] Define API schemas for Print, job retrieval, printer registration, and status reporting.
-- [ ] Create CURL commands for testing (`curl -X POST /api/print`, `curl -X GET /api/get-print-job`, `curl -X POST /api/register-printer`, `curl -X POST /api/report-print-status`).
-- [ ] Implement `/api/print` endpoint to:
+- [x] Define API schemas for Print, job retrieval, printer registration, and status reporting.
+- [x] Create CURL commands for testing (`curl -X POST /api/print`, `curl -X GET /api/get-print-job`, `curl -X POST /api/register-printer`, `curl -X POST /api/report-print-status`).
+- [x] Implement `/api/print` endpoint to:
   - Validate `purchase_id` (`prints_used < prints_allowed`) and `gcode_file_url` in `purchases`.
   - Verify G-code TTL (`gcode_ttl_expiry > NOW()`).
   - Publish print job to `print-jobs` topic with `purchase_id`, `gcode_file_url`.
   - Return `{ status, purchase_id, print_job_id }`.
-- [ ] Implement `/api/get-print-job` endpoint to:
+- [x] Implement `/api/get-print-job` endpoint to:
   - Authenticate printer with long-lived JWT.
   - Return `gcode_file_url` and encrypted `gcode_dek` from `purchases` for `purchase_id`.
   - Example Response: `{ "gcode_file_url": "gs://...", "gcode_dek": "<encrypted_dek>" }`.
-- [ ] Implement `/api/register-printer` endpoint to:
+- [x] Implement `/api/register-printer` endpoint to:
   - [x] Locally generate a unique Printer-Specific Encryption Key (PSEK).
   - [x] Send the PSEK to the Custodial Wallet Service (CWS) to be envelope-encrypted using the Master Printer KEK.
   - [x] Store the CWS-returned encrypted PSEK in the `printers` table (currently in the `kek_id` column).
   - [x] Return comprehensive printer details, including `printer_id` and the `encrypted_psek` (stored as `kek_id`).
-  - [ ] Generate and return a long-lived JWT (e.g., 30-day expiry) specifically for the printer to authenticate subsequent machine-to-machine requests (e.g., to `/api/get-print-job`). (Future Step)
+  - [x] Generate and return a long-lived JWT (e.g., 30-day expiry) specifically for the printer to authenticate subsequent machine-to-machine requests (e.g., to `/api/get-print-job`). (Future Step)
 - [ ] Implement `/api/report-print-status` endpoint to:
   - Process success/failure reports from `hedera_slicer.py`.
   - If `status = "success"`, increment `prints_used` in `purchases`, log `model_print` to [[HCS]].
   - If `status = "failure"`, don’t increment `prints_used`, log `print_failure` to [[HCS]].
   - Update `purchases` (`print_status`, `print_error`).
   - Return `{ status, purchase_id, print_job_id, print_outcome }`.
-- [ ] Refactor `hedera_slicer.py` to:
+- [x] Refactor `hedera_slicer.py` to:
   - Subscribe to `print-jobs` topic for print tasks.
   - Authenticate with long-lived JWT to call `/api/get-print-job`.
   - Fetch encrypted G-code from GCS, decrypt in-memory using DEK (Fernet).
   - Stream G-code to Klipper via `STREAM_GCODE_LINE`, avoiding disk storage.
   - Report status to `/api/report-print-status`.
-- [ ] Enhance refund logic in `hedera_slicer.py` using `print_stats.py`.
+- [x] Enhance refund logic in `hedera_slicer.py` using `print_stats.py`.
 - [x] Create `printers` table in LMNT Marketplace database:
   ```sql
   CREATE TABLE printers (
