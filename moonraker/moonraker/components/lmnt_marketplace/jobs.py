@@ -216,9 +216,10 @@ class JobManager:
                                     if not processed_job.get('gcode_url'):
                                         logging.error(f"LMNT JOB POLLING: Missing encrypted_gcode_download_url for job {print_job_id}")
                                         continue
-                                    if not all(processed_job.get(k) for k in ['gcode_dek_package', 'gcode_iv_hex', 'printer_kek_id']):
-                                        # Note: printer_kek_id is only strictly needed for the legacy PSEK path
-                                        logging.error(f"LMNT JOB POLLING: Missing one or more crypto fields for job {print_job_id}: DEK_encrypted_hex, IV_hex, or printer_kek_id")
+                                    # Essential fields for decryption are gcode_dek_package and gcode_iv_hex.
+                                    # printer_kek_id is only used for the legacy PSEK path (if crypto_manager chooses that route).
+                                    if not (processed_job.get('gcode_dek_package') and processed_job.get('gcode_iv_hex')):
+                                        logging.error(f"LMNT JOB POLLING: Missing required crypto fields for job {print_job_id}: gcode_dek_package or gcode_iv_hex")
                                         continue
                                     # Add job to queue for processing
                                     await self._process_pending_jobs([processed_job])
@@ -682,25 +683,28 @@ class JobManager:
             
             # Stream decrypted GCode to Klipper
             # The file at decrypted_filepath is already plaintext.
-            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper")
+            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'processing' before starting G-code stream.")
+            await self._update_job_status(job_id, 'processing', 'Print execution started.')
+
+            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper for job {job_id}. This may take a while.")
             metadata = await self.integration.gcode_manager.stream_decrypted_gcode(
                 decrypted_filepath, job_id) # Pass the path to the decrypted file
             
             if not metadata:
-                logging.error(f"LMNT PRINT: Failed to stream G-code for job {job_id} from {decrypted_filepath}")
+                logging.error(f"LMNT PRINT: Failed to stream/execute G-code for job {job_id} from {decrypted_filepath}.")
+                logging.info(f"LMNT PRINT: Updating job {job_id} status to 'failed'.")
+                await self._update_job_status(job_id, 'failed', 'Print execution failed.')
                 return False
             
-            # Save metadata
+            # Save metadata (only on success)
+            logging.info(f"LMNT PRINT: G-code streaming/execution successful for job {job_id}. Saving metadata.")
             self.integration.gcode_manager.save_metadata(job_id)
             
-            # Update job status to printing
-            await self._update_job_status(job_id, 'printing', 'Print started')
+            # Update job status to success
+            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'success'.")
+            await self._update_job_status(job_id, 'success', 'Print completed successfully.')
             
-            # Start monitoring print progress
-            logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
-            asyncio.create_task(self._monitor_print_progress(job_id))
-            
-            logging.info(f"LMNT PRINT: Successfully started print for job {job_id}")
+            logging.info(f"LMNT PRINT: Successfully completed print job {job_id}")
             return True
             
         except Exception as e:
@@ -767,17 +771,31 @@ class JobManager:
     async def _monitor_print_progress(self, job_id):
         """Monitor print progress and update status"""
         logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
+
+        printer_obj = None
+        print_stats_obj = None
+        max_retries = 3
+        retry_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                printer_obj = self.integration.server.lookup_component('printer')
+                if printer_obj:
+                    print_stats_obj = printer_obj.get_object('print_stats')
+                    if print_stats_obj:
+                        logging.info(f"LMNT MONITOR: Successfully found 'printer' component and 'print_stats' for job {job_id} on attempt {attempt + 1}.")
+                        break  # Successfully got both objects
+                logging.warning(f"LMNT MONITOR: Attempt {attempt + 1} to get printer/print_stats failed for job {job_id} (printer_obj: {printer_obj is not None}, print_stats_obj: {print_stats_obj is not None}). Retrying in {retry_delay}s...")
+            except Exception as e:  # Consider importing and catching moonraker.utils.exceptions.ServerError specifically
+                logging.warning(f"LMNT MONITOR: Exception on attempt {attempt + 1} to get printer/print_stats for job {job_id}: {str(e)}. Retrying in {retry_delay}s...")
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
         
-        # Get the printer object from the server components
-        printer_obj = self.integration.server.lookup_component('printer')
-        # Get printer status component. This object's attributes will be updated by Moonraker.
-        print_stats_obj = printer_obj.get_object('print_stats')
-        
-        # Check if the print_stats object was successfully retrieved
-        if print_stats_obj is None:
-            logging.error(f"LMNT MONITOR: Failed to get 'print_stats' object from Klippy. Cannot monitor job {job_id}.")
-            await self._update_job_status(job_id, 'failed', 'Internal error: Failed to get print_stats object.')
-            self._finalize_job(job_id, success=False)
+        if not printer_obj or not print_stats_obj:
+            logging.error(f"LMNT MONITOR: Failed to get 'printer' component or 'print_stats' object after {max_retries} attempts for job {job_id}. Cannot monitor job.")
+            await self._update_job_status(job_id, 'failed', 'Internal error: Failed to connect to printer for status monitoring.')
+            # self._finalize_job(job_id, success=False) # Removed as _update_job_status already reports failure
             return
 
         while self.current_print_job and self.current_print_job.get('id') == job_id:
