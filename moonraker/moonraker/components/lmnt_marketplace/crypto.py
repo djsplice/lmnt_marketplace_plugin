@@ -154,7 +154,19 @@ class CryptoManager:
                 nonce_bytes = base64.b64decode(nonce_b64)
                 ciphertext_bytes = base64.b64decode(ciphertext_b64)
 
-                printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519.to_curve25519_private_key()
+                # self.dlt_private_key_ed25519 is expected to be an Ed25519SigningKey.
+                # The error "'PrivateKey' object has no attribute 'to_curve25519_private_key'"
+                # suggests it might actually be a nacl.public.PrivateKey (Curve25519PrivateKey) instance.
+                # If it's an Ed25519SigningKey, it will have 'to_curve25519_private_key'.
+                # If it's already a Curve25519PrivateKey, it won't, and we can use it directly.
+                if hasattr(self.dlt_private_key_ed25519, 'to_curve25519_private_key'):
+                    printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519.to_curve25519_private_key()
+                elif isinstance(self.dlt_private_key_ed25519, Curve25519PrivateKey):
+                    logging.warning("CryptoManager: dlt_private_key_ed25519 was a Curve25519PrivateKey. Using directly.")
+                    printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519
+                else:
+                    logging.error(f"CryptoManager: dlt_private_key_ed25519 is of unexpected type {type(self.dlt_private_key_ed25519)}. Cannot proceed with DLT decryption.")
+                    return None
                 webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
                 
                 box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
