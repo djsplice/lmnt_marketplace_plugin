@@ -18,9 +18,16 @@ import re
 from datetime import datetime, timedelta
 import jwt
 
+# PyNaCl for ED25519 key operations
+import nacl.utils
+from nacl.public import PrivateKey
+from nacl.encoding import HexEncoder, Base64Encoder
+
 class AuthManager:
     """
     Manages authentication and token operations for LMNT Marketplace
+
+    Handles DLT key pair generation and management for printer identity.
     
     Handles user login, printer registration, token validation,
     token refresh, and JWT management.
@@ -34,6 +41,7 @@ class AuthManager:
         self.user_token = None  # Temporary storage for user JWT during registration
         self.printer_id = None
         self.printer_kek_id = None # Added to store printer_kek_id
+        self.dlt_private_key = None # For DLT-native printer key pair
         self.klippy_apis = None
         
         # Create HTTP client for API calls
@@ -42,6 +50,8 @@ class AuthManager:
         
         # Load existing printer token if available
         self.load_printer_token()
+        # Load existing DLT private key if available
+        self._load_dlt_private_key()
         
     def _redact_sensitive_data(self, data, is_json=False):
         """Redact sensitive information from logs when debug mode is disabled"""
@@ -152,7 +162,64 @@ class AuthManager:
         logging.info("LMNT AUTH: No valid printer token found. Printer needs to be registered.")
         logging.info("LMNT AUTH: Use the /machine/lmnt_marketplace/register_printer endpoint to register this printer")
         return False
-    
+
+    def _load_dlt_private_key(self):
+        """Load the DLT private key from secure storage."""
+        # Define the path to the DLT private key file
+        # Ensure self.integration.tokens_path is available and valid
+        if not hasattr(self.integration, 'tokens_path') or not self.integration.tokens_path:
+            logging.error("LMNT AUTH DLT: tokens_path not configured in integration object.")
+            return False
+        
+        dlt_key_filename = "printer_dlt_private_key.hex"
+        dlt_key_file_path = os.path.join(self.integration.tokens_path, dlt_key_filename)
+        logging.info(f"LMNT AUTH DLT: Looking for DLT private key file at {dlt_key_file_path}")
+
+        if os.path.exists(dlt_key_file_path):
+            try:
+                with open(dlt_key_file_path, 'r') as f:
+                    private_key_hex = f.read().strip()
+                if private_key_hex:
+                    self.dlt_private_key = PrivateKey(private_key_hex, encoder=HexEncoder)
+                    logging.info("LMNT AUTH DLT: Successfully loaded DLT private key.")
+                    # Optionally log public key for verification if in debug mode
+                    if self.integration.debug_mode:
+                        public_key_b64 = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
+                        logging.debug(f"LMNT AUTH DLT: Loaded public key (b64): {public_key_b64[:10]}...")
+                    return True
+                else:
+                    logging.warning(f"LMNT AUTH DLT: DLT private key file {dlt_key_file_path} is empty.")
+            except Exception as e:
+                logging.error(f"LMNT AUTH DLT: Error loading DLT private key from {dlt_key_file_path}: {str(e)}")
+                # Potentially corrupted key file, consider renaming/deleting it to force regeneration
+        else:
+            logging.info(f"LMNT AUTH DLT: No DLT private key file found at {dlt_key_file_path}. Will generate on registration if needed.")
+        return False
+
+    def _save_dlt_private_key(self, private_key_hex_str):
+        """Save the DLT private key (hex encoded string) to secure storage."""
+        if not private_key_hex_str:
+            logging.error("LMNT AUTH DLT: Cannot save empty DLT private key string.")
+            return False
+
+        if not hasattr(self.integration, 'tokens_path') or not self.integration.tokens_path:
+            logging.error("LMNT AUTH DLT: tokens_path not configured in integration object for saving.")
+            return False
+
+        dlt_key_filename = "printer_dlt_private_key.hex"
+        dlt_key_file_path = os.path.join(self.integration.tokens_path, dlt_key_filename)
+        
+        try:
+            with open(dlt_key_file_path, 'w') as f:
+                f.write(private_key_hex_str)
+            # Ensure file has restricted permissions if possible (platform dependent)
+            # os.chmod(dlt_key_file_path, 0o600) # Example, might not work on all OS or without sudo
+            logging.info(f"LMNT AUTH DLT: Successfully saved DLT private key to {dlt_key_file_path}")
+            return True
+        except IOError as e:
+            logging.error(f"LMNT AUTH DLT: Error saving DLT private key to {dlt_key_file_path}: {str(e)}")
+            return False
+
     def save_printer_token(self, token, expiry, printer_kek_id=None):
         """Save printer token and kek_id to secure storage"""
         if not token:
@@ -333,7 +400,7 @@ class AuthManager:
                     raise self.integration.server.error(f"Login failed: {error_text}", response.status)
                 
                 data = await response.json()
-                # Redact sensitive information in response for logging
+                # Redact sensitive information in response
                 redacted_data = self._redact_sensitive_data(data, is_json=True)
                 logging.info(f"Login response: {redacted_data}")
                 
@@ -398,6 +465,35 @@ class AuthManager:
             # Register printer with marketplace using the correct endpoint
             register_url = f"{self.integration.marketplace_url}/api/register-printer"
             logging.info(f"Registering printer with URL: {register_url}")
+
+            # DLT Key Pair Management
+            printer_public_key_b64_str = None
+            if self.dlt_private_key is None:
+                logging.info("LMNT AUTH DLT: No existing DLT private key found, generating a new one.")
+                try:
+                    self.dlt_private_key = PrivateKey.generate()
+                    private_key_hex = self.dlt_private_key.encode(encoder=HexEncoder).decode('utf-8')
+                    if not self._save_dlt_private_key(private_key_hex):
+                        # Handle failure to save key, maybe raise an error or log prominently
+                        logging.error("LMNT AUTH DLT: CRITICAL - Failed to save newly generated DLT private key.")
+                        # Depending on policy, might prevent registration or proceed without DLT key
+                        pass # Or raise an exception
+                    else:
+                        logging.info("LMNT AUTH DLT: Successfully generated and saved new DLT private key.")
+                except Exception as e:
+                    logging.error(f"LMNT AUTH DLT: Error generating/saving DLT key pair: {str(e)}")
+                    # Ensure dlt_private_key is None if generation/saving fails
+                    self.dlt_private_key = None
+            
+            if self.dlt_private_key:
+                try:
+                    printer_public_key_b64_str = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
+                    logging.info(f"LMNT AUTH DLT: Using DLT public key (b64): {printer_public_key_b64_str[:10]}...")
+                except Exception as e:
+                    logging.error(f"LMNT AUTH DLT: Error encoding public key: {str(e)}")
+                    printer_public_key_b64_str = None # Ensure it's None if encoding fails
+            else:
+                logging.warning("LMNT AUTH DLT: DLT private key not available. Proceeding with registration without DLT public key.")
             
             # Use standard Authorization header for the marketplace API
             headers = {"Authorization": f"Bearer {self.user_token}"}
@@ -405,10 +501,15 @@ class AuthManager:
             # Build payload with all required fields
             payload = {
                 "printer_name": printer_name,
-                "manufacturer": manufacturer or "LMNT Printer",
-                "model": model or "Klipper"
+                "manufacturer": manufacturer or "LMNT Printer",  # Default if None or empty
+                "model": model or "Klipper"  # Default if None or empty
             }
-            logging.info(f"Registering printer with payload: {payload}")
+            if printer_public_key_b64_str:
+                payload["printer_public_key"] = printer_public_key_b64_str
+            
+            # Redact sensitive information in payload for logging
+            redacted_payload = self._redact_sensitive_data(payload, is_json=True)
+            logging.info(f"Registering printer with payload: {redacted_payload}")
             
             # Redact sensitive information in headers
             redacted_headers = self._redact_sensitive_data(headers)            

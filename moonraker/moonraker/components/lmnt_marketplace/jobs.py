@@ -207,7 +207,7 @@ class JobManager:
                                         'created_at': job.get('created_at'),
                                         # New fields for decryption
                                         'gcode_url': job.get('encrypted_gcode_download_url'), # This is the HTTP(S) URL for the encrypted G-code
-                                        'gcode_dek_encrypted_hex': job.get('gcode_dek_encrypted_hex'),
+                                        'gcode_dek_package': job.get('gcode_dek_encrypted_hex'), # This field now holds either DLT package or legacy hex
                                         'gcode_iv_hex': job.get('gcode_iv_hex'),
                                         'user_account_id': job.get('user_account_id'),
                                         'printer_kek_id': job.get('printer_kek_id')
@@ -216,7 +216,8 @@ class JobManager:
                                     if not processed_job.get('gcode_url'):
                                         logging.error(f"LMNT JOB POLLING: Missing encrypted_gcode_download_url for job {print_job_id}")
                                         continue
-                                    if not all(processed_job.get(k) for k in ['gcode_dek_encrypted_hex', 'gcode_iv_hex', 'printer_kek_id']):
+                                    if not all(processed_job.get(k) for k in ['gcode_dek_package', 'gcode_iv_hex', 'printer_kek_id']):
+                                        # Note: printer_kek_id is only strictly needed for the legacy PSEK path
                                         logging.error(f"LMNT JOB POLLING: Missing one or more crypto fields for job {print_job_id}: DEK_encrypted_hex, IV_hex, or printer_kek_id")
                                         continue
                                     # Add job to queue for processing
