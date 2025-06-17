@@ -683,25 +683,28 @@ class JobManager:
             
             # Stream decrypted GCode to Klipper
             # The file at decrypted_filepath is already plaintext.
-            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper")
+            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'processing' before starting G-code stream.")
+            await self._update_job_status(job_id, 'processing', 'Print execution started.')
+
+            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper for job {job_id}. This may take a while.")
             metadata = await self.integration.gcode_manager.stream_decrypted_gcode(
                 decrypted_filepath, job_id) # Pass the path to the decrypted file
             
             if not metadata:
-                logging.error(f"LMNT PRINT: Failed to stream G-code for job {job_id} from {decrypted_filepath}")
+                logging.error(f"LMNT PRINT: Failed to stream/execute G-code for job {job_id} from {decrypted_filepath}.")
+                logging.info(f"LMNT PRINT: Updating job {job_id} status to 'failed'.")
+                await self._update_job_status(job_id, 'failed', 'Print execution failed.')
                 return False
             
-            # Save metadata
+            # Save metadata (only on success)
+            logging.info(f"LMNT PRINT: G-code streaming/execution successful for job {job_id}. Saving metadata.")
             self.integration.gcode_manager.save_metadata(job_id)
             
-            # Update job status to printing
-            await self._update_job_status(job_id, 'printing', 'Print started')
+            # Update job status to success
+            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'success'.")
+            await self._update_job_status(job_id, 'success', 'Print completed successfully.')
             
-            # Start monitoring print progress
-            logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
-            asyncio.create_task(self._monitor_print_progress(job_id))
-            
-            logging.info(f"LMNT PRINT: Successfully started print for job {job_id}")
+            logging.info(f"LMNT PRINT: Successfully completed print job {job_id}")
             return True
             
         except Exception as e:
@@ -744,7 +747,8 @@ class JobManager:
                 api_status = 'success'
             elif status in ['failed', 'cancelled']:
                 api_status = 'failure'
-            # 'printing' maps to 'printing' (or the API's equivalent for active printing)
+            elif status == 'printing': # Printing is a form of processing
+                api_status = 'processing'
             # 'processing' maps to 'processing'
             
             payload = {"status": api_status}
@@ -791,7 +795,7 @@ class JobManager:
         if not printer_obj or not print_stats_obj:
             logging.error(f"LMNT MONITOR: Failed to get 'printer' component or 'print_stats' object after {max_retries} attempts for job {job_id}. Cannot monitor job.")
             await self._update_job_status(job_id, 'failed', 'Internal error: Failed to connect to printer for status monitoring.')
-            self._finalize_job(job_id, success=False)
+            # self._finalize_job(job_id, success=False) # Removed as _update_job_status already reports failure
             return
 
         while self.current_print_job and self.current_print_job.get('id') == job_id:
