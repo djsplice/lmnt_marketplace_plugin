@@ -744,8 +744,7 @@ class JobManager:
                 api_status = 'success'
             elif status in ['failed', 'cancelled']:
                 api_status = 'failure'
-            elif status == 'printing': # Printing is a form of processing
-                api_status = 'processing'
+            # 'printing' maps to 'printing' (or the API's equivalent for active printing)
             # 'processing' maps to 'processing'
             
             payload = {"status": api_status}
@@ -768,16 +767,30 @@ class JobManager:
     async def _monitor_print_progress(self, job_id):
         """Monitor print progress and update status"""
         logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
+
+        printer_obj = None
+        print_stats_obj = None
+        max_retries = 3
+        retry_delay = 2  # seconds
+
+        for attempt in range(max_retries):
+            try:
+                printer_obj = self.integration.server.lookup_component('printer')
+                if printer_obj:
+                    print_stats_obj = printer_obj.get_object('print_stats')
+                    if print_stats_obj:
+                        logging.info(f"LMNT MONITOR: Successfully found 'printer' component and 'print_stats' for job {job_id} on attempt {attempt + 1}.")
+                        break  # Successfully got both objects
+                logging.warning(f"LMNT MONITOR: Attempt {attempt + 1} to get printer/print_stats failed for job {job_id} (printer_obj: {printer_obj is not None}, print_stats_obj: {print_stats_obj is not None}). Retrying in {retry_delay}s...")
+            except Exception as e:  # Consider importing and catching moonraker.utils.exceptions.ServerError specifically
+                logging.warning(f"LMNT MONITOR: Exception on attempt {attempt + 1} to get printer/print_stats for job {job_id}: {str(e)}. Retrying in {retry_delay}s...")
+            
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
         
-        # Get the printer object from the server components
-        printer_obj = self.integration.server.lookup_component('printer')
-        # Get printer status component. This object's attributes will be updated by Moonraker.
-        print_stats_obj = printer_obj.get_object('print_stats')
-        
-        # Check if the print_stats object was successfully retrieved
-        if print_stats_obj is None:
-            logging.error(f"LMNT MONITOR: Failed to get 'print_stats' object from Klippy. Cannot monitor job {job_id}.")
-            await self._update_job_status(job_id, 'failed', 'Internal error: Failed to get print_stats object.')
+        if not printer_obj or not print_stats_obj:
+            logging.error(f"LMNT MONITOR: Failed to get 'printer' component or 'print_stats' object after {max_retries} attempts for job {job_id}. Cannot monitor job.")
+            await self._update_job_status(job_id, 'failed', 'Internal error: Failed to connect to printer for status monitoring.')
             self._finalize_job(job_id, success=False)
             return
 
