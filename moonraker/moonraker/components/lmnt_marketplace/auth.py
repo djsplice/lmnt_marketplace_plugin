@@ -471,7 +471,7 @@ class AuthManager:
             if self.dlt_private_key is None:
                 logging.info("LMNT AUTH DLT: No existing DLT private key found, generating a new one.")
                 try:
-                    self.dlt_private_key = PrivateKey()
+                    self.dlt_private_key = PrivateKey.generate()
                     private_key_hex = self.dlt_private_key.encode(encoder=HexEncoder).decode('utf-8')
                     if not self._save_dlt_private_key(private_key_hex):
                         # Handle failure to save key, maybe raise an error or log prominently
@@ -482,8 +482,8 @@ class AuthManager:
                         logging.info("LMNT AUTH DLT: Successfully generated and saved new DLT private key.")
                 except Exception as e:
                     logging.error(f"LMNT AUTH DLT: Error generating/saving DLT key pair: {str(e)}")
-                    # Handle error: proceed without DLT key or fail registration?
-                    pass # Or raise an exception
+                    # Ensure dlt_private_key is None if generation/saving fails
+                    self.dlt_private_key = None
             
             if self.dlt_private_key:
                 try:

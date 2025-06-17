@@ -24,8 +24,8 @@ echo "Installing PyJWT..."
 pip install PyJWT
 
 # Install any other dependencies your plugin needs
-echo "Installing other dependencies..."
-pip install requests cryptography
+echo "Installing other dependencies (including PyNaCl for DLT crypto)..."
+pip install requests cryptography PyNaCl>=1.5.0
 
 # Deactivate the virtual environment
 deactivate
