@@ -216,9 +216,10 @@ class JobManager:
                                     if not processed_job.get('gcode_url'):
                                         logging.error(f"LMNT JOB POLLING: Missing encrypted_gcode_download_url for job {print_job_id}")
                                         continue
-                                    if not all(processed_job.get(k) for k in ['gcode_dek_package', 'gcode_iv_hex', 'printer_kek_id']):
-                                        # Note: printer_kek_id is only strictly needed for the legacy PSEK path
-                                        logging.error(f"LMNT JOB POLLING: Missing one or more crypto fields for job {print_job_id}: DEK_encrypted_hex, IV_hex, or printer_kek_id")
+                                    # Essential fields for decryption are gcode_dek_package and gcode_iv_hex.
+                                    # printer_kek_id is only used for the legacy PSEK path (if crypto_manager chooses that route).
+                                    if not (processed_job.get('gcode_dek_package') and processed_job.get('gcode_iv_hex')):
+                                        logging.error(f"LMNT JOB POLLING: Missing required crypto fields for job {print_job_id}: gcode_dek_package or gcode_iv_hex")
                                         continue
                                     # Add job to queue for processing
                                     await self._process_pending_jobs([processed_job])
