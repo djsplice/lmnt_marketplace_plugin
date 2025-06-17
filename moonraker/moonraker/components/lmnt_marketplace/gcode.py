@@ -102,16 +102,11 @@ class GCodeManager:
             rate = line_count / elapsed if elapsed > 0 else 0
             logging.info(f"Completed streaming {line_count} lines{job_info} in {elapsed:.1f}s ({rate:.1f} lines/sec)")
             
-            # Clear decryption key from memory
-            self.integration.crypto_manager.clear_decryption_key()
-            
             # Return metadata
             return metadata
             
         except Exception as e:
             logging.error(f"Error streaming decrypted GCode{job_info}: {str(e)}")
-            # Clear decryption key from memory even on error
-            self.integration.crypto_manager.clear_decryption_key()
             return None
     
     def _extract_metadata(self, gcode_lines, job_id=None):
