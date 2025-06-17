@@ -38,6 +38,7 @@ class CryptoManager:
         self.integration = integration
         self.encrypted_psek = None
         self.decryption_key = None
+        self.dlt_private_key_ed25519 = None
     
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
@@ -67,10 +68,7 @@ class CryptoManager:
 
     def _load_dlt_private_key(self):
         """Load DLT private key (Ed25519 signing key) from secure storage."""
-        # The keypair generated and stored by auth.py was an Ed25519 keypair.
-        # We load the Ed25519 signing (private) key and will convert it to Curve25519 for nacl.box.
         key_file = os.path.join(self.integration.keys_path, "dlt_keypair.json")
-        self.dlt_private_key_ed25519 = None # Store the Ed25519 signing key
         if os.path.exists(key_file):
             try:
                 with open(key_file, 'r') as f:
@@ -78,10 +76,12 @@ class CryptoManager:
                     private_key_b64 = data.get('private_key_b64')
                     if private_key_b64:
                         private_key_bytes = base64.b64decode(private_key_b64)
-                        self.dlt_private_key_ed25519 = Ed25519SigningKey(private_key_bytes)
-                        logging.info("Loaded DLT private key (Ed25519) from storage.")
+                        # This key is passed in from integration.py now, so we just load it here as a fallback
+                        if not self.dlt_private_key_ed25519:
+                            self.dlt_private_key_ed25519 = Ed25519SigningKey(private_key_bytes)
+                            logging.info("Loaded DLT private key (Ed25519) from storage.")
                         return True
-            except (json.JSONDecodeError, IOError, binascii.Error, nacl.exceptions.ValueError) as e:
+            except (json.JSONDecodeError, IOError, binascii.Error) as e:
                 logging.error(f"Error loading DLT private key: {str(e)}")
         
         logging.info("No DLT private key found or error loading it.")
@@ -90,9 +90,6 @@ class CryptoManager:
     def _save_encrypted_psek(self, encrypted_psek):
         """
         Save the encrypted PSEK received from the server
-        
-        According to ADR-003, the kek_id field in the printer registration response
-        actually contains the encrypted PSEK (encrypted by the Master Printer KEK).
         """
         if not encrypted_psek:
             logging.error("Cannot save empty encrypted PSEK")
@@ -101,13 +98,8 @@ class CryptoManager:
         psek_file = os.path.join(self.integration.keys_path, "encrypted_psek.json")
         try:
             with open(psek_file, 'w') as f:
-                json.dump({
-                    'encrypted_psek': encrypted_psek
-                }, f)
-            
-            # Update current encrypted PSEK
+                json.dump({'encrypted_psek': encrypted_psek}, f)
             self.encrypted_psek = encrypted_psek
-            
             logging.info("Saved encrypted PSEK")
             return True
         except IOError as e:
@@ -124,22 +116,13 @@ class CryptoManager:
         headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
         payload = {"dataToDecrypt": data_to_decrypt_b64}
 
-        logging.error(f"CWS Decryption DEBUG: Sending request to {decrypt_url} with data (first 20): {data_to_decrypt_b64[:20]}...")
         try:
             async with self.http_client.post(decrypt_url, headers=headers, json=payload) as response:
-                logging.error(f"CWS Decryption DEBUG: Response status {response.status}")
                 if response.status == 200:
                     resp_json = await response.json()
                     decrypted_b64 = resp_json.get('decryptedData')
                     if decrypted_b64:
-                        try:
-                            return base64.b64decode(decrypted_b64)
-                        except binascii.Error as e:
-                            logging.error(f"CWS Decryption: Error decoding base64 response: {e}")
-                            return None
-                    else:
-                        logging.error("CWS Decryption: 'decryptedData' missing in response.")
-                        return None
+                        return base64.b64decode(decrypted_b64)
                 else:
                     error_text = await response.text()
                     logging.error(f"CWS Decryption: Failed. Status: {response.status}, Body: {error_text}")
@@ -149,529 +132,194 @@ class CryptoManager:
             return None
 
     async def decrypt_dek(self, encrypted_gcode_dek_package, kek_id=None):
-    """
-    Decrypts the G-code DEK.
-    Handles DLT-native and legacy PSEK/CWS encrypted DEK packages.
+        """
+        Decrypts the G-code DEK.
+        Handles DLT-native and legacy PSEK/CWS encrypted DEK packages.
+        """
+        # Path 1: DLT-native package (identified by colons)
+        if ':' in encrypted_gcode_dek_package:
+            logging.info("CryptoManager: DLT-native DEK package detected.")
+            if not self.dlt_private_key_ed25519:
+                logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package.")
+                return None
 
-    Args:
-        encrypted_gcode_dek_package (str): The encrypted G-code DEK.
-                                          For DLT: "ephemPubKeyB64:nonceB64:cipherB64"
-                                          For PSEK: Hex string of IV + Slicer-encrypted G-code DEK.
-        kek_id (str, optional): The printer_kek_id (base64 CWS-encrypted PSEK), only used for PSEK path.
-        
-    Returns:
-        bytes: The plaintext G-code DEK as bytes if successful, else None.
-    """
-    # Path 1: DLT-native package (identified by colons)
-    if ':' in encrypted_gcode_dek_package:
-        logging.info(f"CryptoManager: DLT-native DEK package detected.")
-        
-        # Critical Check: Ensure the DLT private key is loaded before proceeding.
-        if not hasattr(self, 'dlt_private_key_ed25519') or not self.dlt_private_key_ed25519:
-            logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package. Please re-register the printer or check key file permissions.")
+            try:
+                parts = encrypted_gcode_dek_package.split(':')
+                if len(parts) != 3:
+                    logging.error("CryptoManager: DLT DEK package has incorrect format.")
+                    return None
+                
+                ephemeral_pubkey_b64, nonce_b64, ciphertext_b64 = parts
+                ephemeral_pubkey_bytes = base64.b64decode(ephemeral_pubkey_b64)
+                nonce_bytes = base64.b64decode(nonce_b64)
+                ciphertext_bytes = base64.b64decode(ciphertext_b64)
+
+                printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519.to_curve25519_private_key()
+                webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
+                
+                box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
+                
+                plaintext_dek_bytes = box.decrypt(ciphertext_bytes, nonce_bytes)
+                logging.info("CryptoManager: Successfully decrypted G-code DEK via DLT-native path.")
+                return plaintext_dek_bytes
+
+            except (binascii.Error, nacl.exceptions.CryptoError) as e:
+                logging.error(f"CryptoManager: DLT-native DEK decryption failed: {e}.")
+                return None
+
+        # Path 2: Legacy PSEK/CWS package (no colons)
+        else:
+            logging.info("CryptoManager: Legacy PSEK/CWS DEK package detected.")
+            if not kek_id or not encrypted_gcode_dek_package:
+                logging.error("CryptoManager: KEK ID or encrypted G-code DEK is missing for legacy path.")
+                return None
+
+            try:
+                plaintext_psek_bytes = await self._decrypt_data_via_cws(kek_id)
+                if not plaintext_psek_bytes:
+                    logging.error("CryptoManager: Failed to get plaintext PSEK from CWS.")
+                    return None
+
+                iv_from_dek_hex = encrypted_gcode_dek_package[:32]
+                encrypted_dek_hex = encrypted_gcode_dek_package[32:]
+                iv_from_dek_bytes = bytes.fromhex(iv_from_dek_hex)
+                encrypted_dek_bytes = bytes.fromhex(encrypted_dek_hex)
+
+                if len(iv_from_dek_bytes) != 16:
+                    logging.error(f"CryptoManager: Invalid IV length: {len(iv_from_dek_bytes)} bytes.")
+                    return None
+
+                cipher = Cipher(algorithms.AES(plaintext_psek_bytes), modes.CBC(iv_from_dek_bytes), backend=default_backend())
+                decryptor = cipher.decryptor()
+                decrypted_dek_padded = decryptor.update(encrypted_dek_bytes) + decryptor.finalize()
+                
+                unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+                decrypted_dek_unpadded = unpadder.update(decrypted_dek_padded) + unpadder.finalize()
+                
+                logging.info("CryptoManager: Successfully decrypted G-code DEK via legacy path.")
+                return decrypted_dek_unpadded
+
+            except (binascii.Error, ValueError) as e:
+                logging.error(f"CryptoManager: G-code DEK decryption failed: {e}.")
+                return None
+        return None
+
+    async def decrypt_gcode(self, encrypted_data, job_id=None, dek=None, iv=None):
+        """
+        Decrypt GCode data using a provided DEK and IV.
+        """
+        job_info = f" for job {job_id}" if job_id else ""
+        if not dek or not iv:
+            logging.error(f"DEK or IV not provided for G-code decryption{job_info}.")
             return None
 
-        logging.info(f"CryptoManager: Attempting DLT-native DEK decryption for package (first 64): {encrypted_gcode_dek_package[:64]}")
         try:
-            parts = encrypted_gcode_dek_package.split(':')
-            if len(parts) != 3:
-                logging.error("CryptoManager: DLT DEK package has incorrect format. Expected 3 parts separated by colons.")
-                return None
-            
-            ephemeral_pubkey_b64, nonce_b64, ciphertext_b64 = parts
-            
-            ephemeral_pubkey_bytes = base64.b64decode(ephemeral_pubkey_b64)
-            nonce_bytes = base64.b64decode(nonce_b64)
-            ciphertext_bytes = base64.b64decode(ciphertext_b64)
+            iv_bytes = bytes.fromhex(iv)
+            # DEK is already passed as bytes from decrypt_gcode_file_from_job_details
+            dek_bytes = dek
 
-            printer_dlt_private_key_curve25519 = Curve25519PrivateKey(self.dlt_private_key_ed25519.to_curve25519_private_key())
-            webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
-            
-            box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
-            
-            plaintext_dek_bytes = box.decrypt(ciphertext_bytes, nonce_bytes)
-            logging.info(f"CryptoManager: Successfully decrypted G-code DEK via DLT-native path. Plaintext DEK (hex): {plaintext_dek_bytes.hex()}")
-            return plaintext_dek_bytes
-
-        except (binascii.Error, nacl.exceptions.CryptoError, ValueError) as e:
-            logging.error(f"CryptoManager: DLT-native DEK decryption failed: {e}.")
-            return None
-        except Exception as e:
-            logging.error(f"CryptoManager: Unexpected error during DLT-native DEK decryption: {e}.")
-            import traceback
-            logging.error(traceback.format_exc())
-            return None
-
-    # Path 2: Legacy PSEK/CWS package (no colons)
-    else:
-        logging.info(f"CryptoManager: Legacy PSEK/CWS DEK package detected. Attempting decryption.")
-        encrypted_gcode_dek_hex = encrypted_gcode_dek_package
-
-        if not kek_id:
-            logging.error("CryptoManager: KEK ID is missing. Cannot proceed with PSEK decryption.")
-            return None
-        if not encrypted_gcode_dek_hex:
-            logging.error("CryptoManager: Encrypted G-code DEK hex is missing. Cannot proceed with DEK decryption.")
-            return None
-
-        plaintext_psek_bytes = None
-        try:
-            plaintext_psek_bytes = await self._decrypt_data_via_cws(kek_id)
-            if not plaintext_psek_bytes:
-                logging.error("CryptoManager: Failed to get plaintext PSEK from CWS.")
-                return None
-
-            iv_from_dek_hex = encrypted_gcode_dek_hex[:32]
-            encrypted_dek_hex = encrypted_gcode_dek_hex[32:]
-            iv_from_dek_bytes = bytes.fromhex(iv_from_dek_hex)
-            encrypted_dek_bytes = bytes.fromhex(encrypted_dek_hex)
-            
-            logging.error(f"CryptoManager DEBUG: IV for DEK decryption (bytes length): {len(iv_from_dek_bytes)}")
-            logging.error(f"CryptoManager DEBUG: Actual Encrypted DEK for decryption (bytes length): {len(encrypted_dek_actual_bytes)}")
-
-            if len(iv_from_dek_bytes) != 16: # AES IV is 16 bytes for AES-128/192/256
-                logging.error(f"CryptoManager: Invalid IV length after hex conversion: {len(iv_from_dek_bytes)} bytes. Expected 16 bytes.")
-                return None
-
-            cipher = Cipher(
-                algorithms.AES(plaintext_psek_bytes),
-                modes.CBC(iv_from_dek_bytes),
-                backend=default_backend()
-            )
-            logging.error("CryptoManager DEBUG: AES cipher initialized for DEK decryption. Attempting decryption...")
+            cipher = Cipher(algorithms.AES(dek_bytes), modes.CBC(iv_bytes), backend=default_backend())
             decryptor = cipher.decryptor()
-            decrypted_dek_padded = decryptor.update(encrypted_dek_actual_bytes) + decryptor.finalize()
-            logging.error(f"CryptoManager DEBUG: AES DEK decryption complete. Padded DEK (hex, full): {decrypted_dek_padded.hex()}")
-            
-            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
-            logging.error("CryptoManager DEBUG: PKCS7 unpadder initialized for DEK. Attempting unpadding...")
-            decrypted_dek_unpadded = unpadder.update(decrypted_dek_padded) + unpadder.finalize()
-            logging.error(f"CryptoManager DEBUG: Successfully decrypted and unpadded G-code DEK. Plaintext DEK (hex): {decrypted_dek_unpadded.hex()}")
-            logging.error(f"CryptoManager DEBUG: Plaintext G-code DEK length: {len(decrypted_dek_unpadded)} bytes.")
-            
-            return decrypted_dek_unpadded
+            decrypted_padded = decryptor.update(encrypted_data) + decryptor.finalize()
 
-        except binascii.Error as e:
-            logging.error(f"CryptoManager: Hex decoding error during G-code DEK decryption: {e}. PSEK used (hex): {plaintext_psek_bytes.hex() if plaintext_psek_bytes else 'Not available'}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return None
-        except ValueError as ve: 
-            logging.error(f"CryptoManager: ValueError during G-code DEK decryption (often padding or key error): {ve}. PSEK used (hex): {plaintext_psek_bytes.hex() if plaintext_psek_bytes else 'Not available'}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return None
-        except Exception as e:
-            logging.error(f"CryptoManager: General failure during G-code DEK decryption: {e}. PSEK used (hex): {plaintext_psek_bytes.hex() if plaintext_psek_bytes else 'Not available'}")
-            import traceback
-            logging.error(traceback.format_exc())
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+            decrypted_data = unpadder.update(decrypted_padded) + unpadder.finalize()
+            
+            logging.info(f"Successfully decrypted G-code content{job_info}.")
+            return decrypted_data
+
+        except (binascii.Error, ValueError) as e:
+            logging.error(f"Failed to decrypt G-code content{job_info}: {e}")
             return None
 
     async def decrypt_gcode_file_from_job_details(self, encrypted_filepath, job_details_dict, job_id):
         """
         Decrypts an encrypted G-code file using details from the job dictionary.
-
-        Args:
-            encrypted_filepath (str): Path to the encrypted G-code file.
-            job_details_dict (dict): Dictionary containing job details, including crypto materials:
-                                     'gcode_dek_encrypted_hex', 'gcode_iv_hex', 'printer_kek_id'.
-            job_id (str): The job ID for logging purposes.
-
-        Returns:
-            str: Path to the decrypted G-code file if successful, else None.
         """
-        logging.error(f"CryptoManager DEBUG: decrypt_gcode_file_from_job_details called for job {job_id}")
-        gcode_dek_package = job_details_dict.get('gcode_dek_package') # Renamed from gcode_dek_encrypted_hex
+        gcode_dek_package = job_details_dict.get('gcode_dek_package')
         gcode_iv_hex = job_details_dict.get('gcode_iv_hex')
-        # 'user_account_id' is in job_details_dict but not directly used in this decryption path
-        # as PSEK decryption by CWS is implicit to printer, and GDEK decryption is local.
         printer_kek_id = job_details_dict.get('printer_kek_id')
 
-        if not all([gcode_dek_package, gcode_iv_hex]): # printer_kek_id is optional for DLT path
-            # For DLT path, printer_kek_id is not strictly needed for DEK decryption itself.
-            # For legacy path, it is needed. decrypt_dek handles the logic if kek_id is None for legacy.
-            if not gcode_dek_package or not gcode_iv_hex:
-                logging.error(f"CryptoManager: Missing required crypto materials (gcode_dek_package or gcode_iv_hex) in job_details_dict for job {job_id}")
-                return None
-            if ':' not in gcode_dek_package and not printer_kek_id: # Legacy path chosen and kek_id missing
-                logging.error(f"CryptoManager: Missing printer_kek_id for legacy DEK decryption path for job {job_id}")
-                return None
-            logging.error(f"CryptoManager: Missing required crypto materials in job_details_dict for job {job_id}")
+        if not gcode_dek_package or not gcode_iv_hex:
+            logging.error(f"CryptoManager: Missing crypto materials for job {job_id}")
             return None
 
-        plaintext_gcode_dek_bytes = None
         try:
-            # Step 1: Get the plaintext G-code DEK
-            logging.error(f"CryptoManager DEBUG: Attempting to get plaintext G-code DEK for job {job_id}")
             plaintext_gcode_dek_bytes = await self.decrypt_dek(gcode_dek_package, printer_kek_id)
             if not plaintext_gcode_dek_bytes:
                 logging.error(f"CryptoManager: Failed to obtain plaintext G-code DEK for job {job_id}")
                 return None
-            logging.error(f"CryptoManager DEBUG: Obtained plaintext G-code DEK for job {job_id} (hex): {plaintext_gcode_dek_bytes.hex()}")
 
-            # Step 2: Read the encrypted G-code file
-            logging.error(f"CryptoManager DEBUG: Reading encrypted G-code file {encrypted_filepath} for job {job_id}")
             with open(encrypted_filepath, 'rb') as f_enc:
                 encrypted_gcode_content = f_enc.read()
-            logging.error(f"CryptoManager DEBUG: Read {len(encrypted_gcode_content)} bytes from {encrypted_filepath}")
 
-            # Step 3: Decrypt the G-code content
-            logging.error(f"CryptoManager DEBUG: Attempting to decrypt G-code content for job {job_id}")
             decrypted_gcode_bytes = await self.decrypt_gcode(
                 encrypted_gcode_content,
                 job_id=job_id,
-                dek=plaintext_gcode_dek_bytes,  # Pass as bytes
+                dek=plaintext_gcode_dek_bytes,
                 iv=gcode_iv_hex
             )
 
             if not decrypted_gcode_bytes:
                 logging.error(f"CryptoManager: Failed to decrypt G-code content for job {job_id}")
                 return None
-            logging.error(f"CryptoManager DEBUG: Successfully decrypted G-code content for job {job_id}, {len(decrypted_gcode_bytes)} bytes.")
 
-            # Step 4: Save the decrypted G-code to a new temporary file
             base, ext = os.path.splitext(os.path.basename(encrypted_filepath))
-            # Use a more descriptive name for the decrypted file and place it in a path accessible for Klipper later
-            # Typically, Moonraker's gcode_store is used, but here we use the plugin's encrypted_path for temp storage.
-            decrypted_filename = f"{base}.decrypted{ext if ext else '.gcode'}"
+            decrypted_filename = f"{base}.decrypted{ext or '.gcode'}"
             decrypted_filepath = os.path.join(self.integration.encrypted_path, decrypted_filename)
             
-            logging.error(f"CryptoManager DEBUG: Saving decrypted G-code for job {job_id} to {decrypted_filepath}")
             with open(decrypted_filepath, 'wb') as f_dec:
-                f_dec.write(decrypted_gcode_bytes.encode('utf-8'))
+                f_dec.write(decrypted_gcode_bytes)
             
-            logging.error(f"CryptoManager DEBUG: Successfully saved decrypted G-code for job {job_id} to {decrypted_filepath}")
+            logging.info(f"CryptoManager: Successfully saved decrypted G-code for job {job_id} to {decrypted_filepath}")
             return decrypted_filepath
 
         except Exception as e:
             logging.error(f"CryptoManager: Error in decrypt_gcode_file_from_job_details for job {job_id}: {e}")
-            import traceback
-            logging.error(f"CryptoManager: Traceback: {traceback.format_exc()}")
             return None
         
     async def get_decryption_key(self):
         """
         Get the decryption key for GCode files by decrypting the PSEK via CWS
-        
-        Returns:
-            bytes: Decryption key if successful
-            None: If decryption key could not be obtained
         """
-        # Return cached key if available
         if self.decryption_key:
             return self.decryption_key
         
-        # Check if we have a printer token and encrypted PSEK
-        if not self.integration.auth_manager.printer_token:
-            logging.error("Cannot get decryption key: No printer token available")
+        if not self.integration.auth_manager.printer_token or not self.encrypted_psek:
+            logging.error("Cannot get decryption key: No printer token or encrypted PSEK available")
             return None
         
-        if not self.encrypted_psek:
-            logging.error("Cannot get decryption key: No encrypted PSEK available")
-            return None
+        decrypted_psek_bytes = await self._decrypt_data_via_cws(self.encrypted_psek)
+        if decrypted_psek_bytes:
+            self.decryption_key = base64.urlsafe_b64encode(decrypted_psek_bytes)
+            logging.info("Successfully obtained decryption key from CWS")
+            return self.decryption_key
         
-        # Use CWS to decrypt the PSEK
-        decrypt_url = f"{self.integration.cws_url}/api/{self.integration.api_version}/decrypt-psek"
-        
-        try:
-            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
-            payload = {"encrypted_psek": self.encrypted_psek}
-            
-            async with self.http_client.post(decrypt_url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    decrypted_psek = data.get('decrypted_psek')
-                    
-                    if decrypted_psek:
-                        try:
-                            # Decode base64 PSEK to bytes
-                            key_bytes = base64.b64decode(decrypted_psek)
-                            
-                            # Store in memory only, never on disk
-                            self.decryption_key = key_bytes
-                            
-                            logging.info("Successfully obtained decryption key from CWS")
-                            return self.decryption_key
-                        except binascii.Error as e:
-                            logging.error(f"Error decoding decrypted PSEK: {str(e)}")
-                else:
-                    error_text = await response.text()
-                    logging.error(f"PSEK decryption failed with status {response.status}: {error_text}")
-        except Exception as e:
-            logging.error(f"Error getting decryption key: {str(e)}")
-        
+        logging.error("Failed to obtain decryption key from CWS")
         return None
-    
-    async def decrypt_gcode(self, encrypted_data, job_id=None, dek=None, iv=None):
-        """
-        Decrypt GCode data using DEK or PSEK
-        
-        Args:
-            encrypted_data (bytes): Encrypted GCode data
-            job_id (str, optional): Job ID for logging purposes
-            dek (str, optional): Data Encryption Key in base64 format
-            iv (str, optional): Initialization Vector in hex format
-            
-        Returns:
-            str: Decrypted GCode as string if successful
-            None: If decryption failed
-        """
-        job_info = f" for job {job_id}" if job_id else ""
-        
-        try:
-            # Check if both DEK and IV are provided for custom decryption
-            if dek and iv:
-                logging.info(f"Using provided DEK and IV to decrypt GCode{job_info}")
-                logging.info(f"DEK length: {len(dek) if dek else 'None'}, IV length: {len(iv) if iv else 'None'}")
-                try:
-                    # Convert hex IV to bytes
-                    iv_bytes = bytes.fromhex(iv) if isinstance(iv, str) else iv
-                    logging.info(f"IV bytes length: {len(iv_bytes)}, IV bytes: {iv_bytes[:8]}...")
-                    
-                    # DEK is now expected to be bytes if coming from decrypt_gcode_file_from_job_details
-                    if isinstance(dek, bytes):
-                        dek_bytes = dek
-                        logging.info(f"DEK is already bytes.")
-                    elif isinstance(dek, str):
-                        # Check if DEK is in hex format (not base64)
-                        is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek)
-                        if is_hex_dek:
-                            logging.info(f"DEK appears to be in hex format, converting from hex")
-                            dek_bytes = bytes.fromhex(dek)
-                        else:
-                            # Try base64 decode as fallback
-                            logging.info(f"DEK appears to be in base64 format, converting from base64")
-                            dek_bytes = base64.b64decode(dek)
-                    else:
-                        logging.error(f"Unsupported DEK type: {type(dek)}")
-                        return None
-                    
-                    logging.info(f"DEK bytes length: {len(dek_bytes)}, DEK bytes (first 8): {dek_bytes[:8]}...")
-                    
-                    # Use AES-CBC for decryption with the provided IV
-                    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-                    from cryptography.hazmat.backends import default_backend
-                    
-                    # Create AES cipher with the DEK and IV
-                    aes_key = dek_bytes[:32]
-                    logging.info(f"AES key length: {len(aes_key)}, using AES-CBC mode")
-                    cipher = Cipher(
-                        algorithms.AES(aes_key),  # Use first 32 bytes as AES key
-                        modes.CBC(iv_bytes),  # Use the provided IV
-                        backend=default_backend()
-                    )
-                    
-                    # Create decryptor
-                    decryptor = cipher.decryptor()
-                    logging.info(f"Decryptor created, encrypted data length: {len(encrypted_data)}")
-                    
-                    # Decrypt the data
-                    decrypted_data = decryptor.update(encrypted_data) + decryptor.finalize()
-                    logging.info(f"Decryption completed, decrypted data length: {len(decrypted_data)}")
-                    
-                    # Remove PKCS7 padding if needed
-                    from cryptography.hazmat.primitives.padding import PKCS7
-                    unpadder = PKCS7(128).unpadder()
-                    try:
-                        padded_data = decrypted_data
-                        decrypted_data = unpadder.update(padded_data) + unpadder.finalize()
-                        logging.info(f"Unpadding successful, final data length: {len(decrypted_data)}")
-                    except Exception as e:
-                        logging.warning(f"Failed to unpad data, may not be padded: {str(e)}")
-                        # Continue with the data as is
-                        
-                except Exception as e:
-                    import traceback
-                    logging.error(f"Error using custom decryption with DEK and IV{job_info}: {str(e)}")
-                    logging.error(f"Decryption error traceback: {traceback.format_exc()}")
-                    logging.info(f"Falling back to Fernet decryption")
-                    # Fall back to Fernet decryption
-                    try:
-                        # Check if DEK is in hex format
-                        is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
-                        
-                        # Format DEK for Fernet based on format
-                        if is_hex_dek:
-                            logging.info(f"Fernet fallback: DEK appears to be in hex format")
-                            # Convert hex to bytes then to Fernet key
-                            dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
-                            key = base64.urlsafe_b64encode(dek_bytes[:32])
-                        else:
-                            logging.info(f"Fernet fallback: DEK appears to be in base64 format")
-                            # Convert base64 to Fernet key
-                            key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
-                            
-                        logging.info(f"Fernet key length: {len(key)}, key: {key[:16]}...")
-                        cipher = Fernet(key)
-                        decrypted_data = cipher.decrypt(encrypted_data)
-                        logging.info(f"Fernet decryption successful, data length: {len(decrypted_data)}")
-                    except Exception as inner_e:
-                        logging.error(f"Fernet fallback also failed{job_info}: {str(inner_e)}")
-                        logging.error(f"Fernet error traceback: {traceback.format_exc()}")
-                        # Fall back to PSEK
-                        logging.info(f"Falling back to PSEK decryption")
-                        key = await self.get_decryption_key()
-                        if not key:
-                            logging.error(f"Failed to get PSEK{job_info}")
-                            return None
-                        logging.info(f"PSEK retrieved, length: {len(key)}, attempting Fernet decryption")
-                        cipher = Fernet(key)
-                        try:
-                            decrypted_data = cipher.decrypt(encrypted_data)
-                            logging.info(f"PSEK decryption successful, data length: {len(decrypted_data)}")
-                        except Exception as psek_e:
-                            logging.error(f"PSEK decryption failed{job_info}: {str(psek_e)}")
-                            logging.error(f"PSEK error traceback: {traceback.format_exc()}")
-                            return None
-            # If only DEK is provided (no IV), use Fernet
-            elif dek:
-                logging.info(f"Using provided DEK with Fernet to decrypt GCode{job_info}")
-                logging.info(f"DEK length: {len(dek) if dek else 'None'}")
-                try:
-                    # Check if DEK is in hex format
-                    is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
-                    
-                    if is_hex_dek:
-                        logging.info(f"DEK appears to be in hex format, converting from hex")
-                        # Convert hex to bytes then to Fernet key
-                        dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
-                        key = base64.urlsafe_b64encode(dek_bytes[:32])
-                    elif not dek.startswith(b'_') and len(dek) >= 32:
-                        logging.info(f"DEK appears to be in base64 format, converting to Fernet key")
-                        # Convert base64 DEK to Fernet key format if needed
-                        key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
-                    else:
-                        # Assume it's already in correct format
-                        logging.info(f"DEK appears to be in Fernet format already")
-                        key = dek.encode() if isinstance(dek, str) else dek
-                        
-                    logging.info(f"Fernet key length: {len(key)}, key: {key[:16]}...")
-                    
-                    # Create Fernet cipher with the key
-                    cipher = Fernet(key)
-                    
-                    # Decrypt the data
-                    decrypted_data = cipher.decrypt(encrypted_data)
-                except Exception as e:
-                    logging.error(f"Error formatting DEK{job_info}: {str(e)}")
-                    # Fall back to PSEK
-                    logging.info(f"Falling back to PSEK decryption")
-                    key = await self.get_decryption_key()
-                    if not key:
-                        logging.error(f"Failed to get PSEK{job_info}")
-                        return None
-                    logging.info(f"PSEK retrieved, length: {len(key)}, attempting Fernet decryption")
-                    cipher = Fernet(key)
-                    try:
-                        decrypted_data = cipher.decrypt(encrypted_data)
-                        logging.info(f"PSEK decryption successful, data length: {len(decrypted_data)}")
-                    except Exception as psek_e:
-                        logging.error(f"PSEK decryption failed{job_info}: {str(psek_e)}")
-                        logging.error(f"PSEK error traceback: {traceback.format_exc()}")
-                        return None
-        # If only DEK is provided (no IV), use Fernet
-        elif dek:
-            logging.info(f"Using provided DEK with Fernet to decrypt GCode{job_info}")
-            logging.info(f"DEK length: {len(dek) if dek else 'None'}")
-            try:
-                # Check if DEK is in hex format
-                is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
 
-                if is_hex_dek:
-                    logging.info(f"DEK appears to be in hex format, converting from hex")
-                    # Convert hex to bytes then to Fernet key
-                    dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
-                    key = base64.urlsafe_b64encode(dek_bytes[:32])
-                elif not dek.startswith(b'_') and len(dek) >= 32:
-                    logging.info(f"DEK appears to be in base64 format, converting to Fernet key")
-                    # Convert base64 DEK to Fernet key format if needed
-                    key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
-                else:
-                    # Assume it's already in correct format
-                    logging.info(f"DEK appears to be in Fernet format already")
-                    key = dek.encode() if isinstance(dek, str) else dek
-
-                logging.info(f"Fernet key length: {len(key)}, key: {key[:16]}...")
-
-                # Create Fernet cipher with the key
-                cipher = Fernet(key)
-
-                # Decrypt the data
-                decrypted_data = cipher.decrypt(encrypted_data)
-            except Exception as e:
-                logging.error(f"Error formatting DEK{job_info}: {str(e)}")
-                # Fall back to PSEK
-                key = await self.get_decryption_key()
-                if not key:
-                    logging.error(f"Failed to get PSEK{job_info}")
-                    return None
-                cipher = Fernet(key)
-                decrypted_data = cipher.decrypt(encrypted_data)
-        else:
-            # Get decryption key (PSEK)
-            key = await self.get_decryption_key()
-
-            if not key:
-                logging.error(f"Failed to get decryption key{job_info}")
-                return None
-
-            # Create Fernet cipher with the key
-            cipher = Fernet(key)
-
-            # Decrypt the data
-            decrypted_data = cipher.decrypt(encrypted_data)
-
-        # Convert to string
-        decrypted_gcode = decrypted_data.decode('utf-8')
-
-        logging.info(f"Successfully decrypted GCode{job_info}")
-        return decrypted_gcode
-
-    except InvalidToken:
-        logging.error(f"Invalid token or corrupted data when decrypting GCode{job_info}")
-    except Exception as e:
-        logging.error(f"Error decrypting GCode{job_info}: {str(e)}")
-
-    return None
-
-async def decrypt_dek(self, encrypted_gdek_hex, job_id=None):
-    """
-    Decrypt DEK using DLT private key or PSEK
-
-    Args:
-        encrypted_gdek_hex (str): Encrypted DEK in hex format
-        job_id (str, optional): Job ID for logging purposes
-
-    Returns:
-        bytes: Decrypted DEK as bytes if successful
-        None: If decryption failed
-    """
-    job_info = f" for job {job_id}" if job_id else ""
-
-    # Check if this is a DLT-native package by looking for the colon separator
-    if ':' in encrypted_gdek_hex:
-        logging.info("CryptoManager: DLT native DEK package detected.")
-        if not self.dlt_private_key:
-            logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package. Please re-register the printer or check file permissions.")
-        if self.decryption_key:
-            # Securely clear the key from memory
-            self.decryption_key = None
-            logging.debug("Cleared decryption key from memory")
-    
-    def generate_dummy_key(self):
-        """
-        Generate a dummy key for testing purposes
-        
-        This should only be used in debug mode and never in production.
-        """
-        if not self.integration.debug:
-            logging.error("Cannot generate dummy key in non-debug mode")
+    async def decrypt_with_key(self, encrypted_data, key):
+        """Decrypt data using a provided Fernet key"""
+        if not key:
+            logging.error("Decryption failed: No key provided")
             return None
         
         try:
-            # Generate a new Fernet key
+            cipher = Fernet(key)
+            decrypted_data = cipher.decrypt(encrypted_data)
+            return decrypted_data
+        except InvalidToken:
+            logging.error("Decryption failed: Invalid token")
+            return None
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during decryption: {str(e)}")
+            return None
+
+    def generate_dummy_key(self):
+        """Generates a dummy Fernet key for testing purposes"""
+        try:
             key = Fernet.generate_key()
-            logging.warning("Generated dummy key for testing - NOT SECURE FOR PRODUCTION")
+            logging.info(f"Generated dummy Fernet key: {key.decode()}")
             return key
         except Exception as e:
             logging.error(f"Error generating dummy key: {str(e)}")
