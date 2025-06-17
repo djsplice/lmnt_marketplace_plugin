@@ -90,6 +90,13 @@ class LmntMarketplaceIntegration:
         self.job_manager = jobs.JobManager(self)
         
         # Link managers to each other
+        # Pass the DLT private key from AuthManager to CryptoManager, if it was loaded
+        if self.auth_manager.dlt_private_key:
+            logging.info("LmntMarketplaceIntegration: Passing DLT private key from AuthManager to CryptoManager.")
+            self.crypto_manager.dlt_private_key_ed25519 = self.auth_manager.dlt_private_key
+        else:
+            logging.warning("LmntMarketplaceIntegration: No DLT private key was loaded by AuthManager, so it cannot be passed to CryptoManager.")
+
         self.job_manager.set_auth_manager(self.auth_manager)
         self.job_manager.set_crypto_manager(self.crypto_manager)
         self.job_manager.set_gcode_manager(self.gcode_manager)

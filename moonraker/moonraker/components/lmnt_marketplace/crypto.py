@@ -149,72 +149,64 @@ class CryptoManager:
             return None
 
     async def decrypt_dek(self, encrypted_gcode_dek_package, kek_id=None):
-        """
-        Decrypts the G-code DEK.
-        Can handle DLT-native encrypted DEK (format: ephemPubKeyB64:nonceB64:cipherB64)
-        or fallback to PSEK/CWS method using kek_id.
+    """
+    Decrypts the G-code DEK.
+    Handles DLT-native and legacy PSEK/CWS encrypted DEK packages.
 
-        Args:
-            encrypted_gcode_dek_package (str): The encrypted G-code DEK.
-                                              For DLT: "ephemPubKeyB64:nonceB64:cipherB64"
-                                              For PSEK: Hex string of IV + Slicer-encrypted G-code DEK.
-            kek_id (str, optional): The printer_kek_id (base64 CWS-encrypted PSEK), only used for PSEK path.
-            
-        Returns:
-            bytes: The plaintext G-code DEK as bytes if successful, else None.
-        """
-        # Try DLT-native path first if the format matches
-        if ':' in encrypted_gcode_dek_package and hasattr(self, 'dlt_private_key_ed25519') and self.dlt_private_key_ed25519:
-            logging.info(f"CryptoManager: Attempting DLT-native DEK decryption for package (first 64): {encrypted_gcode_dek_package[:64]}")
-            try:
-                parts = encrypted_gcode_dek_package.split(':')
-                if len(parts) != 3:
-                    logging.error("CryptoManager: DLT DEK package has incorrect format. Expected 3 parts separated by colons.")
-                    # Fall through to PSEK if kek_id is available, otherwise it will fail later.
-                else:
-                    ephemeral_pubkey_b64, nonce_b64, ciphertext_b64 = parts
-                    
-                    ephemeral_pubkey_bytes = base64.b64decode(ephemeral_pubkey_b64)
-                    nonce_bytes = base64.b64decode(nonce_b64)
-                    ciphertext_bytes = base64.b64decode(ciphertext_b64)
-
-                    # Convert stored Ed25519 private key to Curve25519 private key for nacl.box
-                    printer_dlt_private_key_curve25519 = Curve25519PrivateKey(self.dlt_private_key_ed25519.to_curve25519_private_key())
-                    webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
-                    
-                    # Create a Box object using the printer's Curve25519 private key and Webslicer's Curve25519 ephemeral public key
-                    box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
-                    
-                    plaintext_dek_bytes = box.decrypt(ciphertext_bytes, nonce_bytes)
-                    logging.info(f"CryptoManager: Successfully decrypted G-code DEK via DLT-native path. Plaintext DEK (hex): {plaintext_dek_bytes.hex()}")
-                    return plaintext_dek_bytes
-
-            except (binascii.Error, nacl.exceptions.CryptoError, ValueError) as e:
-                logging.error(f"CryptoManager: DLT-native DEK decryption failed: {e}. Falling back to PSEK if kek_id provided.")
-                # Fall through to PSEK if kek_id is available
-            except Exception as e:
-                logging.error(f"CryptoManager: Unexpected error during DLT-native DEK decryption: {e}. Falling back to PSEK if kek_id provided.")
-                import traceback
-                logging.error(traceback.format_exc())
-                # Fall through to PSEK if kek_id is available
-
-        # Fallback to PSEK/CWS method or if DLT path failed/not applicable
-        logging.info(f"CryptoManager: Attempting PSEK/CWS DEK decryption. Encrypted GDEK (hex, first 64): {encrypted_gcode_dek_package[:64] if encrypted_gcode_dek_package else 'None'}, KEK ID (first 20): {kek_id[:20] if kek_id else 'None'}")
-        encrypted_gcode_dek_hex = encrypted_gcode_dek_package # In this path, the package is the hex string
-        """
-        Decrypts the G-code DEK.
-        Step 1: Use kek_id (encrypted PSEK) to get plaintext PSEK from CWS.
-        Step 2: Use plaintext PSEK to locally decrypt encrypted_gcode_dek_hex.
-
-        Args:
-            encrypted_gcode_dek_hex (str): Hex string of IV + Slicer-encrypted G-code DEK.
-            kek_id (str): The printer_kek_id (base64 CWS-encrypted PSEK).
-            
-        Returns:
-            bytes: The plaintext G-code DEK as bytes if successful, else None.
-        """
-        logging.error(f"CryptoManager DEBUG: decrypt_dek called. Encrypted GDEK (hex, first 64): {encrypted_gcode_dek_hex[:64] if encrypted_gcode_dek_hex else 'None'}, KEK ID (first 20): {kek_id[:20] if kek_id else 'None'}")
+    Args:
+        encrypted_gcode_dek_package (str): The encrypted G-code DEK.
+                                          For DLT: "ephemPubKeyB64:nonceB64:cipherB64"
+                                          For PSEK: Hex string of IV + Slicer-encrypted G-code DEK.
+        kek_id (str, optional): The printer_kek_id (base64 CWS-encrypted PSEK), only used for PSEK path.
         
+    Returns:
+        bytes: The plaintext G-code DEK as bytes if successful, else None.
+    """
+    # Path 1: DLT-native package (identified by colons)
+    if ':' in encrypted_gcode_dek_package:
+        logging.info(f"CryptoManager: DLT-native DEK package detected.")
+        
+        # Critical Check: Ensure the DLT private key is loaded before proceeding.
+        if not hasattr(self, 'dlt_private_key_ed25519') or not self.dlt_private_key_ed25519:
+            logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package. Please re-register the printer or check key file permissions.")
+            return None
+
+        logging.info(f"CryptoManager: Attempting DLT-native DEK decryption for package (first 64): {encrypted_gcode_dek_package[:64]}")
+        try:
+            parts = encrypted_gcode_dek_package.split(':')
+            if len(parts) != 3:
+                logging.error("CryptoManager: DLT DEK package has incorrect format. Expected 3 parts separated by colons.")
+                return None
+            
+            ephemeral_pubkey_b64, nonce_b64, ciphertext_b64 = parts
+            
+            ephemeral_pubkey_bytes = base64.b64decode(ephemeral_pubkey_b64)
+            nonce_bytes = base64.b64decode(nonce_b64)
+            ciphertext_bytes = base64.b64decode(ciphertext_b64)
+
+            printer_dlt_private_key_curve25519 = Curve25519PrivateKey(self.dlt_private_key_ed25519.to_curve25519_private_key())
+            webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
+            
+            box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
+            
+            plaintext_dek_bytes = box.decrypt(ciphertext_bytes, nonce_bytes)
+            logging.info(f"CryptoManager: Successfully decrypted G-code DEK via DLT-native path. Plaintext DEK (hex): {plaintext_dek_bytes.hex()}")
+            return plaintext_dek_bytes
+
+        except (binascii.Error, nacl.exceptions.CryptoError, ValueError) as e:
+            logging.error(f"CryptoManager: DLT-native DEK decryption failed: {e}.")
+            return None
+        except Exception as e:
+            logging.error(f"CryptoManager: Unexpected error during DLT-native DEK decryption: {e}.")
+            import traceback
+            logging.error(traceback.format_exc())
+            return None
+
+    # Path 2: Legacy PSEK/CWS package (no colons)
+    else:
+        logging.info(f"CryptoManager: Legacy PSEK/CWS DEK package detected. Attempting decryption.")
+        encrypted_gcode_dek_hex = encrypted_gcode_dek_package
+
         if not kek_id:
             logging.error("CryptoManager: KEK ID is missing. Cannot proceed with PSEK decryption.")
             return None
@@ -222,42 +214,17 @@ class CryptoManager:
             logging.error("CryptoManager: Encrypted G-code DEK hex is missing. Cannot proceed with DEK decryption.")
             return None
 
-        plaintext_psek_bytes = None # Initialize for use in exception logging
+        plaintext_psek_bytes = None
         try:
-            # Step 1: Get PSEK from CWS
-            logging.error(f"CryptoManager DEBUG: Attempting to decrypt KEK ID via CWS (first 20 chars): {kek_id[:20]}...")
             plaintext_psek_bytes = await self._decrypt_data_via_cws(kek_id)
-            
-            if plaintext_psek_bytes:
-                logging.error(f"CryptoManager DEBUG: Successfully obtained plaintext PSEK from CWS (hex): {plaintext_psek_bytes.hex()}")
-                logging.error(f"CryptoManager DEBUG: Plaintext PSEK length: {len(plaintext_psek_bytes)} bytes.")
-            else:
-                logging.error("CryptoManager: _decrypt_data_via_cws returned None or empty for PSEK.")
-                return None
-
-            if len(plaintext_psek_bytes) != 32: # AES-256 key must be 32 bytes
-                logging.error(f"CryptoManager: Invalid PSEK length: {len(plaintext_psek_bytes)} bytes. Expected 32 bytes for AES-256.")
-                return None
-
-            logging.error(f"CryptoManager DEBUG: Encrypted G-code DEK (hex, full): {encrypted_gcode_dek_hex}")
-            
-            # Step 2: Locally decrypt the G-code DEK using the plaintext PSEK
-            if len(encrypted_gcode_dek_hex) < 32:
-                logging.error(f"CryptoManager: Encrypted G-code DEK hex is too short to contain an IV: {len(encrypted_gcode_dek_hex)} chars.")
+            if not plaintext_psek_bytes:
+                logging.error("CryptoManager: Failed to get plaintext PSEK from CWS.")
                 return None
 
             iv_from_dek_hex = encrypted_gcode_dek_hex[:32]
-            encrypted_dek_actual_hex = encrypted_gcode_dek_hex[32:]
-
-            logging.error(f"CryptoManager DEBUG: IV for DEK decryption (hex): {iv_from_dek_hex}")
-            logging.error(f"CryptoManager DEBUG: Actual Encrypted DEK for decryption (hex): {encrypted_dek_actual_hex}")
-
-            if not iv_from_dek_hex or not encrypted_dek_actual_hex:
-                logging.error("CryptoManager: IV or Encrypted DEK hex is empty after splitting.")
-                return None
-
+            encrypted_dek_hex = encrypted_gcode_dek_hex[32:]
             iv_from_dek_bytes = bytes.fromhex(iv_from_dek_hex)
-            encrypted_dek_actual_bytes = bytes.fromhex(encrypted_dek_actual_hex)
+            encrypted_dek_bytes = bytes.fromhex(encrypted_dek_hex)
             
             logging.error(f"CryptoManager DEBUG: IV for DEK decryption (bytes length): {len(iv_from_dek_bytes)}")
             logging.error(f"CryptoManager DEBUG: Actual Encrypted DEK for decryption (bytes length): {len(encrypted_dek_actual_bytes)}")
@@ -588,46 +555,104 @@ class CryptoManager:
                 except Exception as e:
                     logging.error(f"Error formatting DEK{job_info}: {str(e)}")
                     # Fall back to PSEK
+                    logging.info(f"Falling back to PSEK decryption")
                     key = await self.get_decryption_key()
                     if not key:
                         logging.error(f"Failed to get PSEK{job_info}")
                         return None
+                    logging.info(f"PSEK retrieved, length: {len(key)}, attempting Fernet decryption")
                     cipher = Fernet(key)
-                    decrypted_data = cipher.decrypt(encrypted_data)
-            else:
-                # Get decryption key (PSEK)
-                key = await self.get_decryption_key()
-                
-                if not key:
-                    logging.error(f"Failed to get decryption key{job_info}")
-                    return None
-                
+                    try:
+                        decrypted_data = cipher.decrypt(encrypted_data)
+                        logging.info(f"PSEK decryption successful, data length: {len(decrypted_data)}")
+                    except Exception as psek_e:
+                        logging.error(f"PSEK decryption failed{job_info}: {str(psek_e)}")
+                        logging.error(f"PSEK error traceback: {traceback.format_exc()}")
+                        return None
+        # If only DEK is provided (no IV), use Fernet
+        elif dek:
+            logging.info(f"Using provided DEK with Fernet to decrypt GCode{job_info}")
+            logging.info(f"DEK length: {len(dek) if dek else 'None'}")
+            try:
+                # Check if DEK is in hex format
+                is_hex_dek = all(c in '0123456789abcdefABCDEF' for c in dek) if isinstance(dek, str) else False
+
+                if is_hex_dek:
+                    logging.info(f"DEK appears to be in hex format, converting from hex")
+                    # Convert hex to bytes then to Fernet key
+                    dek_bytes = bytes.fromhex(dek) if isinstance(dek, str) else dek
+                    key = base64.urlsafe_b64encode(dek_bytes[:32])
+                elif not dek.startswith(b'_') and len(dek) >= 32:
+                    logging.info(f"DEK appears to be in base64 format, converting to Fernet key")
+                    # Convert base64 DEK to Fernet key format if needed
+                    key = base64.urlsafe_b64encode(base64.b64decode(dek)[:32])
+                else:
+                    # Assume it's already in correct format
+                    logging.info(f"DEK appears to be in Fernet format already")
+                    key = dek.encode() if isinstance(dek, str) else dek
+
+                logging.info(f"Fernet key length: {len(key)}, key: {key[:16]}...")
+
                 # Create Fernet cipher with the key
                 cipher = Fernet(key)
-                
+
                 # Decrypt the data
                 decrypted_data = cipher.decrypt(encrypted_data)
-            
-            # Convert to string
-            decrypted_gcode = decrypted_data.decode('utf-8')
-            
-            logging.info(f"Successfully decrypted GCode{job_info}")
-            return decrypted_gcode
-        
-        except InvalidToken:
-            logging.error(f"Invalid token or corrupted data when decrypting GCode{job_info}")
-        except Exception as e:
-            logging.error(f"Error decrypting GCode{job_info}: {str(e)}")
-        
-        return None
-    
-    def clear_decryption_key(self):
-        """
-        Clear the in-memory decryption key
-        
-        This should be called after decryption operations are complete
-        to minimize the time the key is held in memory.
-        """
+            except Exception as e:
+                logging.error(f"Error formatting DEK{job_info}: {str(e)}")
+                # Fall back to PSEK
+                key = await self.get_decryption_key()
+                if not key:
+                    logging.error(f"Failed to get PSEK{job_info}")
+                    return None
+                cipher = Fernet(key)
+                decrypted_data = cipher.decrypt(encrypted_data)
+        else:
+            # Get decryption key (PSEK)
+            key = await self.get_decryption_key()
+
+            if not key:
+                logging.error(f"Failed to get decryption key{job_info}")
+                return None
+
+            # Create Fernet cipher with the key
+            cipher = Fernet(key)
+
+            # Decrypt the data
+            decrypted_data = cipher.decrypt(encrypted_data)
+
+        # Convert to string
+        decrypted_gcode = decrypted_data.decode('utf-8')
+
+        logging.info(f"Successfully decrypted GCode{job_info}")
+        return decrypted_gcode
+
+    except InvalidToken:
+        logging.error(f"Invalid token or corrupted data when decrypting GCode{job_info}")
+    except Exception as e:
+        logging.error(f"Error decrypting GCode{job_info}: {str(e)}")
+
+    return None
+
+async def decrypt_dek(self, encrypted_gdek_hex, job_id=None):
+    """
+    Decrypt DEK using DLT private key or PSEK
+
+    Args:
+        encrypted_gdek_hex (str): Encrypted DEK in hex format
+        job_id (str, optional): Job ID for logging purposes
+
+    Returns:
+        bytes: Decrypted DEK as bytes if successful
+        None: If decryption failed
+    """
+    job_info = f" for job {job_id}" if job_id else ""
+
+    # Check if this is a DLT-native package by looking for the colon separator
+    if ':' in encrypted_gdek_hex:
+        logging.info("CryptoManager: DLT native DEK package detected.")
+        if not self.dlt_private_key:
+            logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package. Please re-register the printer or check file permissions.")
         if self.decryption_key:
             # Securely clear the key from memory
             self.decryption_key = None
