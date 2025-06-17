@@ -138,7 +138,7 @@ class CryptoManager:
         """
         # Path 1: DLT-native package (identified by colons)
         if ':' in encrypted_gcode_dek_package:
-            logging.info("CryptoManager: DLT-native DEK package detected.")
+            logging.info("CryptoManager: Asymmetrically encrypted DEK package detected.")
             if not self.dlt_private_key_ed25519:
                 logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package.")
                 return None
