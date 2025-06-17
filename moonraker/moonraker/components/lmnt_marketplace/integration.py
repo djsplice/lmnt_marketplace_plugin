@@ -123,7 +123,7 @@ class LmntMarketplaceIntegration:
         await self.job_manager.initialize(klippy_apis, self.http_client)
         
         # Start background tasks
-        self.server.add_task(self._background_tasks())
+        self.eventloop.create_task(self._background_tasks())
         
         logging.info("LMNT Marketplace Integration initialized with Klippy APIs")
     
