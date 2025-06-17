@@ -67,25 +67,26 @@ class CryptoManager:
         logging.info("No DLT private key found or error loading it.")
         return False
     
-    async def decrypt_dek(self, encrypted_gcode_dek_package, kek_id=None):
+    async def decrypt_dek(self, encrypted_gcode_dek_package):
         """
         Decrypts the G-code DEK.
-        Handles DLT-native (colon-separated) encrypted DEK packages.
-        The kek_id parameter is no longer used.
+        Handles asymmetrically encrypted DEK packages (distinguished by colon separators)
+        which are encrypted using the printer's public key.
         """
         if ':' not in encrypted_gcode_dek_package:
-            logging.error(f"CryptoManager: DEK package format not recognized or not DLT-native: {encrypted_gcode_dek_package[:30]}...")
+            # This check distinguishes the new asymmetric format from the old (now removed) symmetric one.
+            logging.error(f"CryptoManager: DEK package format not recognized as asymmetric: {encrypted_gcode_dek_package[:30]}...")
             return None
 
-        logging.info("CryptoManager: Asymmetrically encrypted DLT-native DEK package detected.")
+        logging.info("CryptoManager: Asymmetrically encrypted DEK package detected, using printer-generated key path.")
         if not self.dlt_private_key_ed25519:
-            logging.error("CryptoManager: DLT private key not loaded. Cannot decrypt DLT-native package.")
+            logging.error("CryptoManager: Printer's private key not loaded. Cannot decrypt asymmetric package.")
             return None
 
         try:
             parts = encrypted_gcode_dek_package.split(':')
             if len(parts) != 3:
-                logging.error("CryptoManager: DLT DEK package has incorrect format.")
+                logging.error("CryptoManager: Asymmetric DEK package has incorrect format.")
                 return None
             
             ephemeral_pubkey_b64, nonce_b64, ciphertext_b64 = parts
@@ -99,18 +100,18 @@ class CryptoManager:
                 logging.warning("CryptoManager: dlt_private_key_ed25519 was a Curve25519PrivateKey. Using directly.")
                 printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519
             else:
-                logging.error(f"CryptoManager: dlt_private_key_ed25519 is of unexpected type {type(self.dlt_private_key_ed25519)}. Cannot proceed with DLT decryption.")
+                logging.error(f"CryptoManager: Printer's private key is of unexpected type {type(self.dlt_private_key_ed25519)}. Cannot proceed with asymmetric decryption.")
                 return None
             webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
             
             box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
             
             plaintext_dek_bytes = box.decrypt(ciphertext_bytes, nonce_bytes)
-            logging.info("CryptoManager: Successfully decrypted G-code DEK via DLT-native path.")
+            logging.info("CryptoManager: Successfully decrypted G-code DEK using printer's private key.")
             return plaintext_dek_bytes
 
         except (binascii.Error, nacl.exceptions.CryptoError) as e:
-            logging.error(f"CryptoManager: DLT-native DEK decryption failed: {e}.")
+            logging.error(f"CryptoManager: Asymmetric DEK decryption failed: {e}.")
             return None
 
     async def decrypt_gcode(self, encrypted_data, job_id=None, dek=None, iv=None):
@@ -147,14 +148,14 @@ class CryptoManager:
         """
         gcode_dek_package = job_details_dict.get('gcode_dek_package')
         gcode_iv_hex = job_details_dict.get('gcode_iv_hex')
-        printer_kek_id = job_details_dict.get('printer_kek_id')
 
         if not gcode_dek_package or not gcode_iv_hex:
             logging.error(f"CryptoManager: Missing crypto materials for job {job_id}")
             return None
 
         try:
-            plaintext_gcode_dek_bytes = await self.decrypt_dek(gcode_dek_package, printer_kek_id)
+            # The printer_kek_id is no longer used as we only support the asymmetric printer-generated key path here.
+            plaintext_gcode_dek_bytes = await self.decrypt_dek(gcode_dek_package)
             if not plaintext_gcode_dek_bytes:
                 logging.error(f"CryptoManager: Failed to obtain plaintext G-code DEK for job {job_id}")
                 return None
