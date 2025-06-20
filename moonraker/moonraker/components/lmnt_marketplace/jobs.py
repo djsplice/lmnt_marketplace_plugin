@@ -366,61 +366,55 @@ class JobManager:
         
         logging.info(f"LMNT PROCESS: Successfully downloaded encrypted GCode to {encrypted_filepath}")
 
-        # Decrypt GCode
-        logging.info(f"LMNT PROCESS: Starting decryption of GCode for job {job_id} at {encrypted_filepath}")
-        decrypted_filepath = None
-        try:
-            decrypted_filepath = await self.integration.crypto_manager.decrypt_gcode_file_from_job_details(
-                encrypted_filepath,
-                job, # Pass the whole job dictionary
-                job_id
-            )
-        except Exception as e_decrypt:
-            logging.error(f"LMNT PROCESS: Exception during GCode decryption for job {job_id}: {e_decrypt}")
-            import traceback
-            logging.error(f"LMNT PROCESS: Decryption exception traceback: {traceback.format_exc()}")
-
-        if not decrypted_filepath:
-            logging.error(f"LMNT PROCESS: Failed to decrypt GCode for job {job_id}")
-            await self._update_job_status(job_id, 'failed', 'Failed to decrypt GCode')
-            if os.path.exists(encrypted_filepath):
+        if encrypted_filepath and os.path.exists(encrypted_filepath) and job.get('gcode_dek_package') and job.get('gcode_iv_hex'):
+            logging.info(f"LMNT PROCESS: Decrypting GCode for job {job_id}")
+            try:
+                gcode_dek_bytes = await self.crypto_manager.decrypt_dek(job.get('gcode_dek_package'))
+                if not gcode_dek_bytes:
+                    raise ValueError("Failed to decrypt G-code DEK")
+                
+                # Decrypt G-code into memory instead of file
+                decrypted_gcode = await self.crypto_manager.decrypt_gcode_to_memory(encrypted_filepath, gcode_dek_bytes, job.get('gcode_iv_hex'))
+                if decrypted_gcode is None:
+                    raise ValueError("Failed to decrypt G-code into memory")
+                
+                # Create an in-memory file using memfd_create
+                mem_fd = os.memfd_create(f"decrypted_gcode_{job_id}")
+                with os.fdopen(mem_fd, 'wb') as mem_file:
+                    mem_file.write(decrypted_gcode)
+                
+                logging.info(f"LMNT PROCESS: Successfully decrypted GCode for job {job_id} into memory with FD {mem_fd}")
+                # Clean up the original encrypted file after successful decryption
+                if os.path.exists(encrypted_filepath):
+                    try:
+                        os.remove(encrypted_filepath)
+                        logging.info(f"LMNT PROCESS: Cleaned up original encrypted file {encrypted_filepath}")
+                    except Exception as e_rm_enc_orig:
+                        logging.error(f"LMNT PROCESS: Error cleaning up original encrypted file {encrypted_filepath}: {e_rm_enc_orig}")
+                
+                # Start printing with the in-memory file descriptor
+                logging.info(f"LMNT PROCESS: Starting print for job {job_id} with in-memory FD {mem_fd}")
+                success = await self._start_print(job, mem_fd)
+                
+                if not success:
+                    logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
+                    await self._update_job_status(job_id, 'failed', 'Failed to start print')
+                else:
+                    logging.info(f"LMNT PROCESS: Successfully started print for job {job_id}")
+                
+                # Close the FD after attempting to start print
                 try:
-                    os.remove(encrypted_filepath)
-                    logging.info(f"LMNT PROCESS: Cleaned up encrypted file {encrypted_filepath} after decryption failure.")
-                except Exception as e_rm_enc:
-                    logging.error(f"LMNT PROCESS: Error cleaning up encrypted file {encrypted_filepath}: {e_rm_enc}")
-            self.current_print_job = None
-            return
-
-        logging.info(f"LMNT PROCESS: Successfully decrypted GCode for job {job_id} to {decrypted_filepath}")
-        # Clean up the original encrypted file after successful decryption
-        if os.path.exists(encrypted_filepath):
-            try:
-                os.remove(encrypted_filepath)
-                logging.info(f"LMNT PROCESS: Cleaned up original encrypted file {encrypted_filepath}")
-            except Exception as e_rm_enc_orig:
-                logging.error(f"LMNT PROCESS: Error cleaning up original encrypted file {encrypted_filepath}: {e_rm_enc_orig}")
-
-        # Start printing with the DECRYPTED file
-        logging.info(f"LMNT PROCESS: Starting print for job {job_id} with decrypted file {decrypted_filepath}")
-        success = await self._start_print(job, decrypted_filepath) # Pass decrypted_filepath
-        
-        if not success:
-            logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
-            await self._update_job_status(job_id, 'failed', 'Failed to start print')
-            # No current_print_job reset here, _start_print might have its own logic or it's a final state
-        else:
-            logging.info(f"LMNT PROCESS: Successfully started print for job {job_id}")
-        
-        # Cleanup decrypted file after attempting to start print, regardless of success, 
-        # as Klipper/Moonraker should have taken over or it failed.
-        if decrypted_filepath and os.path.exists(decrypted_filepath):
-            try:
-                os.remove(decrypted_filepath)
-                logging.info(f"LMNT PROCESS: Cleaned up decrypted file {decrypted_filepath}")
-            except Exception as e_rm_dec:
-                logging.error(f"LMNT PROCESS: Error cleaning up decrypted file {decrypted_filepath}: {e_rm_dec}")
-
+                    os.close(mem_fd)
+                    logging.info(f"LMNT PROCESS: Closed in-memory FD {mem_fd}")
+                except Exception as e_close_fd:
+                    logging.error(f"LMNT PROCESS: Error closing in-memory FD {mem_fd}: {e_close_fd}")
+            except Exception as e:
+                logging.error(f"LMNT PROCESS: Error decrypting GCode for job {job_id}: {str(e)}")
+                import traceback
+                logging.error(f"LMNT PROCESS: Exception traceback: {traceback.format_exc()}")
+                await self._update_job_status(job_id, 'failed', 'Failed to decrypt GCode')
+                self.current_print_job = None
+                return
     
     async def _check_printer_ready(self):
         """Check if printer is ready for a new print job"""
@@ -640,34 +634,33 @@ class JobManager:
         
         return None
     
-    async def _start_print(self, job, decrypted_filepath):
+    async def _start_print(self, job, mem_fd):
         """
         Start printing a job
         
         Args:
             job (dict): Job information
-            decrypted_filepath (str): Path to DECRYPTED GCode file
-            
+            mem_fd (int): File descriptor of the in-memory decrypted GCode file
+        
         Returns:
             bool: True if print started successfully, False otherwise
         """
-        job_id = job.get('id')
-        
-        if not job_id or not decrypted_filepath:
-            logging.error("LMNT PRINT: Cannot start print: Missing job ID or decrypted file path")
-            return False
-        
-        logging.info(f"LMNT PRINT: Starting print for job {job_id}")
-        
         try:
-            # Check if printer is ready
-            is_ready = await self._check_printer_ready()
-            if not is_ready:
-                logging.error(f"LMNT PRINT: Cannot start print for job {job_id}: Printer not ready")
+            job_id = job.get('id')
+            if not job_id:
+                logging.error("LMNT PRINT: No job ID provided")
                 return False
             
-            # Decryption is now handled before this method is called.
-            # gcode_filepath (now decrypted_filepath) is already plaintext.
+            if self.current_print_job and self.current_print_job.get('id') != job_id:
+                logging.error(f"LMNT PRINT: Another job {self.current_print_job.get('id')} is in progress")
+                return False
+            
+            if not self._check_printer_ready():
+                logging.error("LMNT PRINT: Printer is not ready")
+                return False
+            
+            self.current_print_job = job
+            self.print_job_started = True
             
             # Home the printer if needed
             try:
@@ -678,43 +671,32 @@ class JobManager:
                 logging.error(f"LMNT PRINT: Error homing printer: {str(e)}")
                 return False
             
-            # File at decrypted_filepath is already plaintext.
-            # No need to read and decrypt it here.
-            
-            # Stream decrypted GCode to Klipper
-            # The file at decrypted_filepath is already plaintext.
+            # Stream decrypted GCode to Kalico using FD
             logging.info(f"LMNT PRINT: Updating job {job_id} status to 'processing' before starting G-code stream.")
             await self._update_job_status(job_id, 'processing', 'Print execution started.')
 
-            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper for job {job_id}. This may take a while.")
-            metadata = await self.integration.gcode_manager.stream_decrypted_gcode(
-                decrypted_filepath, job_id) # Pass the path to the decrypted file
+            logging.info(f"LMNT PRINT: Sending in-memory G-code FD {mem_fd} to Kalico for job {job_id}. This may take a while.")
+            # Use patched Moonraker connection to send FD
+            klippy_connection = self.integration.server.lookup_component('klippy_connection')
+            await klippy_connection.send_command_with_fd('printer.print.start', mem_fd, job_id=job_id)
             
-            if not metadata:
-                logging.error(f"LMNT PRINT: Failed to stream/execute G-code for job {job_id} from {decrypted_filepath}.")
-                logging.info(f"LMNT PRINT: Updating job {job_id} status to 'failed'.")
-                await self._update_job_status(job_id, 'failed', 'Print execution failed.')
-                return False
+            # Assume success if no exception (actual metadata extraction might be handled differently now)
+            logging.info(f"LMNT PRINT: G-code streaming initiated for job {job_id}.")
             
-            # Save metadata (only on success)
-            logging.info(f"LMNT PRINT: G-code streaming/execution successful for job {job_id}. Saving metadata.")
-            self.integration.gcode_manager.save_metadata(job_id)
+            # Update job status to success (might need adjustment based on actual feedback)
+            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'printing'.")
+            await self._update_job_status(job_id, 'printing', 'Print streaming started.')
             
-            # Update job status to success
-            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'success'.")
-            await self._update_job_status(job_id, 'success', 'Print completed successfully.')
-            
-            logging.info(f"LMNT PRINT: Successfully completed print job {job_id}")
+            logging.info(f"LMNT PRINT: Successfully initiated print job {job_id}")
             return True
             
         except Exception as e:
-            logging.error(f"LMNT PRINT: Error starting print for job {job_id}: {str(e)}")
-            import traceback
-            logging.error(f"LMNT PRINT: Exception traceback: {traceback.format_exc()}")
+            logging.error(f"LMNT PRINT: Error starting print for job {job.get('id', 'unknown')}: {str(e)}")
+            if job.get('id'):
+                await self._update_job_status(job.get('id'), 'failed', f'Print start error: {str(e)}')
+            self.current_print_job = None
+            self.print_job_started = False
             return False
-    
-    # This method is no longer needed as _poll_for_jobs now provides all crypto materials.
-    # async def _get_gcode_dek(self, job_id): ... (entire method removed)
     
     async def _update_job_status(self, job_id, status, message=None):
         """

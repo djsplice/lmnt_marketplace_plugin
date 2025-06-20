@@ -715,6 +715,26 @@ class KlippyConnection:
         finally:
             self.pending_requests.pop(base_request.id, None)
 
+    async def send_command_with_fd(self, method, fd=None, **params):
+        """
+        Send a JSON-RPC command to Kalico, optionally with a file descriptor.
+        
+        Args:
+            method (str): The JSON-RPC method to call.
+            fd (int, optional): File descriptor to send to Kalico.
+            **params: Additional parameters for the JSON-RPC call.
+        """
+        msg = self._format_jsonrpc(method, params)
+        if fd is not None:
+            import socket
+            import struct
+            ancdata = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, struct.pack('i', fd))]
+            await self.writer.sendmsg([msg.encode()], ancdata)
+            logging.info(f"Sent command {method} with FD {fd} to Kalico")
+        else:
+            await self.writer.send(msg.encode())
+            logging.info(f"Sent command {method} to Kalico without FD")
+
     def remove_subscription(self, conn: APITransport) -> None:
         self.subscriptions.pop(conn, None)
 
