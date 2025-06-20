@@ -234,70 +234,103 @@ async def decrypt_and_stream(self, klippy_apis, encrypted_filepath, job_id=None)
         dict: Metadata extracted from the GCode
         None: If streaming failed
     """
+    import os
+    import io
+    import time
+    import logging
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.backends import default_backend
+    
+    self.klippy_apis = klippy_apis
     self.current_job_id = job_id
     job_info = f" for job {job_id}" if job_id else ""
     
     try:
-        logging.info(f"Starting to decrypt and stream GCode{job_info}")
-        
-        # Get decryption key
-        key = await self.integration.crypto_manager.get_decryption_key(encrypted_filepath)
-        if not key:
-            error_msg = f"Failed to get decryption key{job_info}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
+        logging.info(f"Starting in-memory decryption and streaming from {encrypted_filepath}{job_info}")
         
         # Read encrypted file
         with open(encrypted_filepath, 'rb') as f:
             encrypted_gcode = f.read()
         
-        # Decrypt GCode in memory
-        decrypted_gcode = await self.integration.crypto_manager.decrypt_gcode(
-            encrypted_gcode)
+        # Get decryption key
+        dek = await self.integration.crypto_manager.get_decryption_key(job_id)
+        if not dek:
+            logging.error(f"Failed to get decryption key{job_info}")
+            # Clear decryption key from memory
+            self.integration.crypto_manager.clear_decryption_key()
+            return None
         
-        if not decrypted_gcode:
-            error_msg = f"Failed to decrypt GCode{job_info}"
-            logging.error(error_msg)
-            raise Exception(error_msg)
+        iv = dek.get('iv')
+        key = dek.get('key')
         
-        # Split into lines
-        lines = decrypted_gcode.splitlines()
+        if not iv or not key:
+            logging.error(f"Missing IV or key for decryption{job_info}")
+            # Clear decryption key from memory
+            self.integration.crypto_manager.clear_decryption_key()
+            return None
         
-        # For test purposes, create a simple metadata dictionary
-        metadata = {
-            'layer_count': 0,
-            'estimated_time': 0,
-            'filament_used': 0.0
-        }
+        iv_bytes = bytes.fromhex(iv)
+        key_bytes = key
         
-        # Stream the lines to Klipper
-        await klippy_apis.run_gcode("CLEAR_STREAM_OUTPUT")
+        # Create cipher and decryptor
+        cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv_bytes), backend=default_backend())
+        decryptor = cipher.decryptor()
         
-        # Stream GCode line-by-line
-        line_count = 0
+        # Create memfd for in-memory storage
+        memfd = os.memfd_create(f"gcode_{job_id or 'temp'}", 0)
+        logging.info(f"Created memfd for in-memory storage{job_info}")
+        
+        # Decrypt in chunks and write to memfd
+        chunk_size = 8192  # 8KB chunks
+        unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+        
+        for i in range(0, len(encrypted_gcode), chunk_size):
+            chunk = encrypted_gcode[i:i + chunk_size]
+            decrypted_padded_chunk = decryptor.update(chunk)
+            decrypted_chunk = unpadder.update(decrypted_padded_chunk)
+            if decrypted_chunk:
+                os.write(memfd, decrypted_chunk)
+        
+        # Finalize decryption and unpadding
+        final_padded = decryptor.finalize()
+        final_decrypted = unpadder.update(final_padded) + unpadder.finalize()
+        if final_decrypted:
+            os.write(memfd, final_decrypted)
+        
+        logging.info(f"Decrypted content written to memfd{job_info}")
+        
+        # Seek to the beginning of memfd for reading
+        os.lseek(memfd, 0, os.SEEK_SET)
+        
+        # Wrap memfd in a file-like object for reading
+        memfd_file = os.fdopen(memfd, 'rb')
+        stream = io.BufferedReader(memfd_file)
+        
+        # Begin streaming to Klipper
         start_time = time.time()
+        line_count = 0
+        metadata = {}
         
-        for line in lines:
-            # Skip empty lines and comments
-            if not line or line.strip().startswith(';'):
-                continue
+        while True:
+            line = stream.readline()
+            if not line:
+                break
             
-            # Escape double quotes in the line
-            escaped_line = line.replace('"', '\\"')
-            
-            # Send the line to Klipper
-            await klippy_apis.run_gcode(f'STREAM_GCODE_LINE LINE="{escaped_line}"')
+            decoded_line = line.decode('utf-8').strip()
             line_count += 1
             
-            # Log progress periodically
             if line_count % 1000 == 0:
                 elapsed = time.time() - start_time
                 rate = line_count / elapsed if elapsed > 0 else 0
                 logging.info(f"Streamed {line_count} lines{job_info} ({rate:.1f} lines/sec)")
+            
+            if not metadata:
+                metadata = await self._extract_metadata_from_line(decoded_line, line_count)
+            
+            await klippy_apis.run_gcode(decoded_line)
         
-        # Signal end of streaming
-        await klippy_apis.run_gcode("STREAM_GCODE_LINE")
-        
+        # End of streaming is implicit when G-code lines run out.
         # Log completion
         elapsed = time.time() - start_time
         rate = line_count / elapsed if elapsed > 0 else 0

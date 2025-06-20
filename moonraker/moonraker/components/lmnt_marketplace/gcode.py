@@ -56,45 +56,84 @@ class GCodeManager:
             
             # Read decrypted file
             with open(decrypted_filepath, 'r', encoding='utf-8') as f:
-                decrypted_gcode_content = f.read()
-            
-            decrypted_gcode = decrypted_gcode_content # Assign to the variable used by splitlines
+                # Begin streaming to Klipper
+                start_time = time.time()
+                line_count = 0
+                metadata = {}
+                
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    line_count += 1
+                    
+                    if line_count % 1000 == 0:
+                        elapsed = time.time() - start_time
+                        rate = line_count / elapsed if elapsed > 0 else 0
+                        logging.info(f"Streamed {line_count} lines{job_info} ({rate:.1f} lines/sec)")
+                    
+                    if not metadata:
+                        metadata = await self._extract_metadata_from_line(line, line_count)
+                    
+                    await self.klippy_apis.run_gcode(line)
+                
+                # End of streaming is implicit when G-code lines run out.
+                # Log completion
+                elapsed = time.time() - start_time
+                rate = line_count / elapsed if elapsed > 0 else 0
+                logging.info(f"Completed streaming {line_count} lines{job_info} in {elapsed:.1f}s ({rate:.1f} lines/sec)")
+                
+                # Return metadata
+                return metadata
+                
+        except Exception as e:
+            logging.error(f"Error streaming decrypted GCode{job_info}: {str(e)}")
+            return None
 
-            if not decrypted_gcode:
-                logging.error(f"GCode file {decrypted_filepath} is empty or could not be read{job_info}")
-                return None
+    async def stream_decrypted_gcode_from_stream(self, stream, job_id=None):
+        """
+        Stream decrypted GCode from a provided stream object line-by-line to Klipper
+        
+        Args:
+            stream: A file-like object or stream containing decrypted GCode
+            job_id (str, optional): Job ID for tracking and logging
             
-            # Split into lines
-            lines = decrypted_gcode.splitlines()
+        Returns:
+            dict: Metadata extracted from the GCode
+            None: If streaming failed
+        """
+        self.current_job_id = job_id
+        job_info = f" for job {job_id}" if job_id else ""
+        
+        try:
+            logging.info(f"Starting to stream GCode from provided stream{job_info}")
             
-            # Extract metadata from GCode
-            metadata = self._extract_metadata(lines, job_id)
-            self.current_metadata = metadata
-            
-            # Extract and save thumbnails
-            await self._extract_and_save_thumbnails(lines, job_id)
-            
-            # Prepare Klipper for streaming (CLEAR_STREAM_OUTPUT removed as it caused 'Unknown command')
-            # await self.klippy_apis.run_gcode("CLEAR_STREAM_OUTPUT") 
-            
-            # Stream GCode line-by-line
-            line_count = 0
+            # Begin streaming to Klipper
             start_time = time.time()
+            line_count = 0
+            metadata = {}
             
-            for line in lines:
-                # Skip empty lines and comments
-                if not line or line.strip().startswith(';'):
+            while True:
+                line = stream.readline()
+                if not line:
+                    break
+                
+                decoded_line = line.decode('utf-8').strip()
+                if not decoded_line:
                     continue
                 
-                # Send the line to Klipper (removed double quote escaping)
-                await self.klippy_apis.run_gcode(line)
                 line_count += 1
                 
-                # Log progress periodically
                 if line_count % 1000 == 0:
                     elapsed = time.time() - start_time
                     rate = line_count / elapsed if elapsed > 0 else 0
                     logging.info(f"Streamed {line_count} lines{job_info} ({rate:.1f} lines/sec)")
+                
+                if not metadata:
+                    metadata = await self._extract_metadata_from_line(decoded_line, line_count)
+                
+                await self.klippy_apis.run_gcode(decoded_line)
             
             # End of streaming is implicit when G-code lines run out.
             # Log completion
@@ -106,22 +145,22 @@ class GCodeManager:
             return metadata
             
         except Exception as e:
-            logging.error(f"Error streaming decrypted GCode{job_info}: {str(e)}")
+            logging.error(f"Error streaming decrypted GCode from stream{job_info}: {str(e)}")
             return None
-    
-    def _extract_metadata(self, gcode_lines, job_id=None):
+
+    async def _extract_metadata_from_line(self, line, line_count):
         """
-        Extract metadata from GCode lines
+        Extract metadata from a single GCode line
         
         Args:
-            gcode_lines (list): List of GCode lines
-            job_id (str, optional): Job ID for tracking and logging
+            line (str): GCode line
+            line_count (int): Current line count
             
         Returns:
             dict: Extracted metadata
         """
         metadata = {
-            'job_id': job_id,
+            'job_id': self.current_job_id,
             'layer_count': 0,
             'estimated_time': 0,
             'filament_used': 0,
@@ -146,65 +185,52 @@ class GCodeManager:
         filament_type_pattern = re.compile(r';FILAMENT_TYPE:(.*)')
         generated_by_pattern = re.compile(r';Generated with (.*)')
         
-        # Scan the first 1000 lines for metadata
-        for i, line in enumerate(gcode_lines[:1000]):
-            if i > 1000:  # Only check the first 1000 lines for metadata
-                break
-                
-            if line.startswith(';'):
-                # Layer count
-                match = layer_count_pattern.search(line)
-                if match:
-                    metadata['layer_count'] = int(match.group(1))
-                    continue
-                
-                # Estimated time
-                match = time_pattern.search(line)
-                if match:
-                    metadata['estimated_time'] = int(match.group(1))
-                    continue
-                
-                # Filament used
-                match = filament_pattern.search(line)
-                if match:
-                    metadata['filament_used'] = float(match.group(1))
-                    continue
-                
-                # First layer height
-                match = first_layer_height_pattern.search(line)
-                if match:
-                    metadata['first_layer_height'] = float(match.group(1))
-                    continue
-                
-                # Layer height
-                match = layer_height_pattern.search(line)
-                if match:
-                    metadata['layer_height'] = float(match.group(1))
-                    continue
-                
-                # Object height
-                match = object_height_pattern.search(line)
-                if match:
-                    metadata['object_height'] = float(match.group(1))
-                    continue
-                
-                # Nozzle diameter
-                match = nozzle_diameter_pattern.search(line)
-                if match:
-                    metadata['nozzle_diameter'] = float(match.group(1))
-                    continue
-                
-                # Filament type
-                match = filament_type_pattern.search(line)
-                if match:
-                    metadata['filament_type'] = match.group(1).strip()
-                    continue
-                
-                # Generated by
-                match = generated_by_pattern.search(line)
-                if match:
-                    metadata['generated_by'] = match.group(1).strip()
-                    continue
+        # Extract metadata from the line
+        if line.startswith(';'):
+            # Layer count
+            match = layer_count_pattern.search(line)
+            if match:
+                metadata['layer_count'] = int(match.group(1))
+            
+            # Estimated time
+            match = time_pattern.search(line)
+            if match:
+                metadata['estimated_time'] = int(match.group(1))
+            
+            # Filament used
+            match = filament_pattern.search(line)
+            if match:
+                metadata['filament_used'] = float(match.group(1))
+            
+            # First layer height
+            match = first_layer_height_pattern.search(line)
+            if match:
+                metadata['first_layer_height'] = float(match.group(1))
+            
+            # Layer height
+            match = layer_height_pattern.search(line)
+            if match:
+                metadata['layer_height'] = float(match.group(1))
+            
+            # Object height
+            match = object_height_pattern.search(line)
+            if match:
+                metadata['object_height'] = float(match.group(1))
+            
+            # Nozzle diameter
+            match = nozzle_diameter_pattern.search(line)
+            if match:
+                metadata['nozzle_diameter'] = float(match.group(1))
+            
+            # Filament type
+            match = filament_type_pattern.search(line)
+            if match:
+                metadata['filament_type'] = match.group(1).strip()
+            
+            # Generated by
+            match = generated_by_pattern.search(line)
+            if match:
+                metadata['generated_by'] = match.group(1).strip()
         
         return metadata
     

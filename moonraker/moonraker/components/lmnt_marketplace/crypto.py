@@ -142,6 +142,71 @@ class CryptoManager:
             logging.error(f"Failed to decrypt G-code content{job_info}: {e}")
             return None
 
+    async def decrypt_gcode_to_memory(self, encrypted_filepath, dek, iv, job_id=None):
+        """
+        Decrypt GCode file content to memory using provided DEK and IV, storing in a memfd file.
+        
+        Args:
+            encrypted_filepath (str): Path to the encrypted GCode file
+            dek (bytes): Data Encryption Key for decryption
+            iv (str): Initialization Vector in hex format
+            job_id (str, optional): Job ID for tracking and logging
+        
+        Returns:
+            int: File descriptor of the memfd file containing decrypted data
+            None: If decryption fails
+        """
+        import os
+        job_info = f" for job {job_id}" if job_id else ""
+        
+        if not dek or not iv:
+            logging.error(f"DEK or IV not provided for G-code decryption to memory{job_info}.")
+            return None
+        
+        try:
+            iv_bytes = bytes.fromhex(iv)
+            dek_bytes = dek
+            
+            # Create a memfd file for in-memory storage
+            memfd = os.memfd_create(f"gcode_{job_id or 'temp'}", 0)
+            logging.info(f"Created memfd for in-memory decryption{job_info}")
+            
+            # Read encrypted file content
+            with open(encrypted_filepath, 'rb') as f:
+                encrypted_data = f.read()
+            
+            cipher = Cipher(algorithms.AES(dek_bytes), modes.CBC(iv_bytes), backend=default_backend())
+            decryptor = cipher.decryptor()
+            
+            # Decrypt in chunks and write to memfd
+            chunk_size = 8192  # 8KB chunks
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+            
+            for i in range(0, len(encrypted_data), chunk_size):
+                chunk = encrypted_data[i:i + chunk_size]
+                decrypted_padded_chunk = decryptor.update(chunk)
+                decrypted_chunk = unpadder.update(decrypted_padded_chunk)
+                if decrypted_chunk:
+                    os.write(memfd, decrypted_chunk)
+            
+            # Finalize decryption and unpadding
+            final_padded = decryptor.finalize()
+            final_decrypted = unpadder.update(final_padded) + unpadder.finalize()
+            if final_decrypted:
+                os.write(memfd, final_decrypted)
+            
+            logging.info(f"Successfully decrypted G-code content to memfd{job_info}")
+            
+            # Seek to the beginning of memfd for reading
+            os.lseek(memfd, 0, os.SEEK_SET)
+            return memfd
+        
+        except (binascii.Error, ValueError, IOError) as e:
+            logging.error(f"Failed to decrypt G-code content to memory{job_info}: {e}")
+            if 'memfd' in locals():
+                os.close(memfd)
+            return None
+
     async def decrypt_gcode_file_from_job_details(self, encrypted_filepath, job_details_dict, job_id):
         """
         Decrypts an encrypted G-code file using details from the job dictionary.

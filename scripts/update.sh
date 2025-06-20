@@ -28,7 +28,7 @@ fi
 # Update plugin files
 echo "Updating plugin files..."
 cp "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" "${PLUGIN_DIR}/component/"
-cp "${REPO_DIR}/moonraker/moonraker/components/hedera_slicer.py" "${PLUGIN_DIR}/component/"
+#cp "${REPO_DIR}/moonraker/moonraker/components/hedera_slicer.py" "${PLUGIN_DIR}/component/"
 cp -r "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace/"* "${PLUGIN_DIR}/component/lmnt_marketplace/"
 
 # Restore configuration files
