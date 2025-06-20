@@ -336,91 +336,88 @@ class JobManager:
         # Get next job from queue
         job = self.print_job_queue.pop(0)
         job_id = job.get('id')
-        
-        if not job_id:
-            logging.error("LMNT PROCESS: Invalid job: missing job ID")
-            return
-        
-        logging.info(f"LMNT PROCESS: Processing job {job_id} with data: {job}")
-        
-        # Set as current job
-        self.current_print_job = job
-        self.job_start_time = time.time()
-        logging.info(f"LMNT PROCESS: Set current_print_job to {job_id} at {datetime.now().isoformat()}")
-        logging.info(f"LMNT PROCESS: Job start time recorded for timeout tracking")
+        logging.info(f"LMNT PROCESS: Processing job {job_id}")
         
         # Update job status to processing
-        logging.info(f"LMNT PROCESS: Updating job status to 'processing'")
-        await self._update_job_status(job_id, 'processing', 'Starting job')
+        await self._update_job_status(job_id, 'processing', 'Downloading and decrypting GCode')
         
         # Download GCode
-        logging.info(f"LMNT PROCESS: Starting download of GCode for job {job_id}")
         encrypted_filepath = await self._download_gcode(job)
-        
         if not encrypted_filepath:
             logging.error(f"LMNT PROCESS: Failed to download GCode for job {job_id}")
             await self._update_job_status(job_id, 'failed', 'Failed to download GCode')
-            self.current_print_job = None
-            logging.info(f"LMNT PROCESS: Reset current_print_job to None due to download failure")
             return
         
-        logging.info(f"LMNT PROCESS: Successfully downloaded encrypted GCode to {encrypted_filepath}")
-
-        # Decrypt GCode
-        logging.info(f"LMNT PROCESS: Starting decryption of GCode for job {job_id} at {encrypted_filepath}")
-        decrypted_filepath = None
+        # Set current job
+        self.current_print_job = job
+        
+        # Decrypt GCode to memory using memfd
+        logging.info(f"LMNT PROCESS: Decrypting GCode for job {job_id} to memory")
         try:
-            decrypted_filepath = await self.integration.crypto_manager.decrypt_gcode_file_from_job_details(
-                encrypted_filepath,
-                job, # Pass the whole job dictionary
-                job_id
+            gcode_dek_bytes = await self.crypto_manager.decrypt_dek(job.get('gcode_dek_package'))
+            if not gcode_dek_bytes:
+                logging.error(f"LMNT PROCESS: Failed to decrypt DEK for job {job_id}")
+                await self._update_job_status(job_id, 'failed', 'Failed to decrypt DEK')
+                self.current_print_job = None
+                return
+            
+            decrypted_memfd = await self.crypto_manager.decrypt_gcode_to_memory(
+                encrypted_filepath, gcode_dek_bytes, job.get('gcode_iv_hex'), job_id
             )
-        except Exception as e_decrypt:
-            logging.error(f"LMNT PROCESS: Exception during GCode decryption for job {job_id}: {e_decrypt}")
-            import traceback
-            logging.error(f"LMNT PROCESS: Decryption exception traceback: {traceback.format_exc()}")
-
-        if not decrypted_filepath:
-            logging.error(f"LMNT PROCESS: Failed to decrypt GCode for job {job_id}")
-            await self._update_job_status(job_id, 'failed', 'Failed to decrypt GCode')
-            if os.path.exists(encrypted_filepath):
+            if decrypted_memfd is None:
+                logging.error(f"LMNT PROCESS: Failed to decrypt GCode to memory for job {job_id}")
+                await self._update_job_status(job_id, 'failed', 'Failed to decrypt GCode')
+                self.current_print_job = None
+                return
+            
+            import os
+            import io
+            # Wrap the memfd in a file-like object for reading
+            memfd_file = os.fdopen(decrypted_memfd, 'rb')
+            stream = io.BufferedReader(memfd_file)
+            logging.info(f"LMNT PROCESS: Wrapped memfd in file-like object for job {job_id}")
+            
+            # Update job status before starting print
+            await self._update_job_status(job_id, 'printing', 'Starting print job')
+            
+            # Stream decrypted GCode to Klipper
+            metadata = await self.gcode_manager.stream_decrypted_gcode_from_stream(stream, job_id)
+            if metadata is None:
+                logging.error(f"LMNT PROCESS: Failed to stream decrypted GCode for job {job_id}")
+                await self._update_job_status(job_id, 'failed', 'Failed to stream GCode to printer')
+                self.current_print_job = None
                 try:
-                    os.remove(encrypted_filepath)
-                    logging.info(f"LMNT PROCESS: Cleaned up encrypted file {encrypted_filepath} after decryption failure.")
-                except Exception as e_rm_enc:
-                    logging.error(f"LMNT PROCESS: Error cleaning up encrypted file {encrypted_filepath}: {e_rm_enc}")
+                    stream.close()
+                    logging.info(f"LMNT PROCESS: Closed stream for job {job_id}")
+                except Exception as e_close_stream:
+                    logging.error(f"LMNT PROCESS: Error closing stream for job {job_id}: {e_close_stream}")
+                return
+        
+            try:
+                stream.close()
+                logging.info(f"LMNT PROCESS: Closed stream for job {job_id}")
+            except Exception as e_close_stream:
+                logging.error(f"LMNT PROCESS: Error closing stream for job {job_id}: {e_close_stream}")
+        
+            # Store metadata if available
+            if metadata:
+                self.gcode_manager.current_metadata = metadata
+                logging.info(f"LMNT PROCESS: Stored metadata for job {job_id}: {metadata}")
+        
+            # Update job status to completed after successful streaming (temporary workaround)
+            await self._update_job_status(job_id, 'completed', 'Print job streamed successfully')
+            logging.info(f"LMNT PROCESS: Updated job status to completed for job {job_id} after successful streaming")
+            self.current_print_job = None
+        
+            # Monitor print progress in a background task for additional updates if possible
+            asyncio.create_task(self._monitor_print_progress(job_id))
+        except Exception as e:
+            logging.error(f"LMNT PROCESS: Error decrypting GCode for job {job_id}: {str(e)}")
+            import traceback
+            logging.error(f"LMNT PROCESS: Exception traceback: {traceback.format_exc()}")
+            await self._update_job_status(job_id, 'failed', 'Failed to decrypt GCode')
             self.current_print_job = None
             return
-
-        logging.info(f"LMNT PROCESS: Successfully decrypted GCode for job {job_id} to {decrypted_filepath}")
-        # Clean up the original encrypted file after successful decryption
-        if os.path.exists(encrypted_filepath):
-            try:
-                os.remove(encrypted_filepath)
-                logging.info(f"LMNT PROCESS: Cleaned up original encrypted file {encrypted_filepath}")
-            except Exception as e_rm_enc_orig:
-                logging.error(f"LMNT PROCESS: Error cleaning up original encrypted file {encrypted_filepath}: {e_rm_enc_orig}")
-
-        # Start printing with the DECRYPTED file
-        logging.info(f"LMNT PROCESS: Starting print for job {job_id} with decrypted file {decrypted_filepath}")
-        success = await self._start_print(job, decrypted_filepath) # Pass decrypted_filepath
-        
-        if not success:
-            logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
-            await self._update_job_status(job_id, 'failed', 'Failed to start print')
-            # No current_print_job reset here, _start_print might have its own logic or it's a final state
-        else:
-            logging.info(f"LMNT PROCESS: Successfully started print for job {job_id}")
-        
-        # Cleanup decrypted file after attempting to start print, regardless of success, 
-        # as Klipper/Moonraker should have taken over or it failed.
-        if decrypted_filepath and os.path.exists(decrypted_filepath):
-            try:
-                os.remove(decrypted_filepath)
-                logging.info(f"LMNT PROCESS: Cleaned up decrypted file {decrypted_filepath}")
-            except Exception as e_rm_dec:
-                logging.error(f"LMNT PROCESS: Error cleaning up decrypted file {decrypted_filepath}: {e_rm_dec}")
-
     
     async def _check_printer_ready(self):
         """Check if printer is ready for a new print job"""
@@ -640,34 +637,33 @@ class JobManager:
         
         return None
     
-    async def _start_print(self, job, decrypted_filepath):
+    async def _start_print(self, job, mem_fd):
         """
         Start printing a job
         
         Args:
             job (dict): Job information
-            decrypted_filepath (str): Path to DECRYPTED GCode file
-            
+            mem_fd (int): File descriptor of the in-memory decrypted GCode file
+        
         Returns:
             bool: True if print started successfully, False otherwise
         """
-        job_id = job.get('id')
-        
-        if not job_id or not decrypted_filepath:
-            logging.error("LMNT PRINT: Cannot start print: Missing job ID or decrypted file path")
-            return False
-        
-        logging.info(f"LMNT PRINT: Starting print for job {job_id}")
-        
         try:
-            # Check if printer is ready
-            is_ready = await self._check_printer_ready()
-            if not is_ready:
-                logging.error(f"LMNT PRINT: Cannot start print for job {job_id}: Printer not ready")
+            job_id = job.get('id')
+            if not job_id:
+                logging.error("LMNT PRINT: No job ID provided")
                 return False
             
-            # Decryption is now handled before this method is called.
-            # gcode_filepath (now decrypted_filepath) is already plaintext.
+            if self.current_print_job and self.current_print_job.get('id') != job_id:
+                logging.error(f"LMNT PRINT: Another job {self.current_print_job.get('id')} is in progress")
+                return False
+            
+            if not self._check_printer_ready():
+                logging.error("LMNT PRINT: Printer is not ready")
+                return False
+            
+            self.current_print_job = job
+            self.print_job_started = True
             
             # Home the printer if needed
             try:
@@ -678,43 +674,32 @@ class JobManager:
                 logging.error(f"LMNT PRINT: Error homing printer: {str(e)}")
                 return False
             
-            # File at decrypted_filepath is already plaintext.
-            # No need to read and decrypt it here.
-            
-            # Stream decrypted GCode to Klipper
-            # The file at decrypted_filepath is already plaintext.
+            # Stream decrypted GCode to Kalico using FD
             logging.info(f"LMNT PRINT: Updating job {job_id} status to 'processing' before starting G-code stream.")
             await self._update_job_status(job_id, 'processing', 'Print execution started.')
 
-            logging.info(f"LMNT PRINT: Streaming G-code from {decrypted_filepath} to Klipper for job {job_id}. This may take a while.")
-            metadata = await self.integration.gcode_manager.stream_decrypted_gcode(
-                decrypted_filepath, job_id) # Pass the path to the decrypted file
+            logging.info(f"LMNT PRINT: Sending in-memory G-code FD {mem_fd} to Kalico for job {job_id}. This may take a while.")
+            # Use patched Moonraker connection to send FD
+            klippy_connection = self.integration.server.lookup_component('klippy_connection')
+            await klippy_connection.send_command_with_fd('printer.print.start', mem_fd, job_id=job_id)
             
-            if not metadata:
-                logging.error(f"LMNT PRINT: Failed to stream/execute G-code for job {job_id} from {decrypted_filepath}.")
-                logging.info(f"LMNT PRINT: Updating job {job_id} status to 'failed'.")
-                await self._update_job_status(job_id, 'failed', 'Print execution failed.')
-                return False
+            # Assume success if no exception (actual metadata extraction might be handled differently now)
+            logging.info(f"LMNT PRINT: G-code streaming initiated for job {job_id}.")
             
-            # Save metadata (only on success)
-            logging.info(f"LMNT PRINT: G-code streaming/execution successful for job {job_id}. Saving metadata.")
-            self.integration.gcode_manager.save_metadata(job_id)
+            # Update job status to success (might need adjustment based on actual feedback)
+            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'printing'.")
+            await self._update_job_status(job_id, 'printing', 'Print streaming started.')
             
-            # Update job status to success
-            logging.info(f"LMNT PRINT: Updating job {job_id} status to 'success'.")
-            await self._update_job_status(job_id, 'success', 'Print completed successfully.')
-            
-            logging.info(f"LMNT PRINT: Successfully completed print job {job_id}")
+            logging.info(f"LMNT PRINT: Successfully initiated print job {job_id}")
             return True
             
         except Exception as e:
-            logging.error(f"LMNT PRINT: Error starting print for job {job_id}: {str(e)}")
-            import traceback
-            logging.error(f"LMNT PRINT: Exception traceback: {traceback.format_exc()}")
+            logging.error(f"LMNT PRINT: Error starting print for job {job.get('id', 'unknown')}: {str(e)}")
+            if job.get('id'):
+                await self._update_job_status(job.get('id'), 'failed', f'Print start error: {str(e)}')
+            self.current_print_job = None
+            self.print_job_started = False
             return False
-    
-    # This method is no longer needed as _poll_for_jobs now provides all crypto materials.
-    # async def _get_gcode_dek(self, job_id): ... (entire method removed)
     
     async def _update_job_status(self, job_id, status, message=None):
         """
@@ -769,133 +754,109 @@ class JobManager:
         return False
     
     async def _monitor_print_progress(self, job_id):
-        """Monitor print progress and update status"""
+        """Monitor print progress and update job status"""
         logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
-
-        printer_obj = None
-        print_stats_obj = None
-        max_retries = 3
+        
+        max_attempts = 3
+        attempt = 0
         retry_delay = 2  # seconds
-
-        for attempt in range(max_retries):
-            try:
-                printer_obj = self.integration.server.lookup_component('printer')
-                if printer_obj:
-                    print_stats_obj = printer_obj.get_object('print_stats')
-                    if print_stats_obj:
-                        logging.info(f"LMNT MONITOR: Successfully found 'printer' component and 'print_stats' for job {job_id} on attempt {attempt + 1}.")
-                        break  # Successfully got both objects
-                logging.warning(f"LMNT MONITOR: Attempt {attempt + 1} to get printer/print_stats failed for job {job_id} (printer_obj: {printer_obj is not None}, print_stats_obj: {print_stats_obj is not None}). Retrying in {retry_delay}s...")
-            except Exception as e:  # Consider importing and catching moonraker.utils.exceptions.ServerError specifically
-                logging.warning(f"LMNT MONITOR: Exception on attempt {attempt + 1} to get printer/print_stats for job {job_id}: {str(e)}. Retrying in {retry_delay}s...")
-            
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-        
-        if not printer_obj or not print_stats_obj:
-            logging.error(f"LMNT MONITOR: Failed to get 'printer' component or 'print_stats' object after {max_retries} attempts for job {job_id}. Cannot monitor job.")
-            await self._update_job_status(job_id, 'failed', 'Internal error: Failed to connect to printer for status monitoring.')
-            # self._finalize_job(job_id, success=False) # Removed as _update_job_status already reports failure
-            return
-
-        while self.current_print_job and self.current_print_job.get('id') == job_id:
-            try:
-                # Access the state directly from the print_stats_obj attributes
-                current_state = print_stats_obj.state  # e.g., 'printing', 'complete', 'error'
-                
-                logging.info(f"LMNT MONITOR: Current print state for job {job_id}: {current_state}")
-                
-                if current_state == 'complete':
-                    logging.info(f"LMNT MONITOR: Print job {job_id} completed successfully")
-                    await self._update_job_status(job_id, 'success', 'Print completed successfully')
-                    self._finalize_job(job_id, success=True) # Ensure success=True is passed
-                    break 
-                elif current_state == 'error' or current_state == 'cancelled':
-                    # Try to get an error message if available from print_stats_obj
-                    message = print_stats_obj.message if hasattr(print_stats_obj, 'message') else f'Print failed with state: {current_state}'
-                    logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {current_state}. Message: {message}")
-                    await self._update_job_status(job_id, 'failed', message)
-                    self._finalize_job(job_id, success=False)
-                    break
-                elif current_state == 'printing' or current_state == 'paused':
-                    # Still ongoing, log progress if desired (e.g., print_stats_obj.progress)
-                    # progress_percent = int(print_stats_obj.progress * 100) if hasattr(print_stats_obj, 'progress') and print_stats_obj.progress is not None else 0
-                    # logging.info(f"LMNT MONITOR: Job {job_id} progress: {progress_percent}%")
-                    pass # Continue monitoring
-                else:
-                    # Handle unexpected states
-                    logging.warning(f"LMNT MONITOR: Job {job_id} in unexpected state: {current_state}. Will continue monitoring for now.")
-
-
-                # Wait before next check
-                await asyncio.sleep(self.integration.config.getint('monitor_interval', 5)) # Check every 5 seconds (configurable)
-                
-            except Exception as e:
-                logging.error(f"LMNT MONITOR: Error during print stats monitoring for job {job_id}: {str(e)}")
-                import traceback
-                logging.error(f"LMNT MONITOR: Exception traceback: {traceback.format_exc()}")
-                
-                # If an error occurs during monitoring, assume failure for now.
-                await self._update_job_status(job_id, 'failed', f'Error monitoring print: {str(e)}')
-                self._finalize_job(job_id, success=False)
-                break
-    
-    async def _update_job_progress(self, job_id, progress, current_layer, total_layers, duration):
-        """
-        Update job progress in the marketplace
-        
-        Args:
-            job_id (str): Job ID
-            progress (float): Print progress percentage (0-100)
-            current_layer (int): Current layer being printed
-            total_layers (int): Total number of layers
-            duration (float): Print duration in seconds
-            
-        Returns:
-            bool: True if progress update was successful, False otherwise
-        """
-        if not job_id:
-            return False
-        
-        if not self.integration.auth_manager.printer_token:
-            return False
-        
-        # Only update every 5% or every 2 minutes to avoid excessive API calls
-        if hasattr(self, '_last_progress') and hasattr(self, '_last_progress_time'):
-            if (progress - self._last_progress < 5 and 
-                    time.time() - self._last_progress_time < 120):
-                return True
-        
-        # Store current progress and time
-        self._last_progress = progress
-        self._last_progress_time = time.time()
-        
-        update_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/job-progress/{job_id}"
+        monitor_interval = 10  # seconds between progress checks after initial connection
         
         try:
-            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
-            payload = {
-                "progress": progress,
-                "current_layer": current_layer,
-                "total_layers": total_layers,
-                "duration": duration
-            }
-            
-            async with self.http_client.post(update_url, headers=headers, json=payload) as response:
-                if response.status == 200:
-                    logging.debug(f"Updated job {job_id} progress to {progress:.1f}% (layer {current_layer}/{total_layers})")
-                    return True
-                else:
-                    # Only log errors occasionally to avoid log spam
-                    if progress % 20 < 5:  # Log errors at 0%, 20%, 40%, 60%, 80%
-                        error_text = await response.text()
-                        logging.error(f"Job progress update failed with status {response.status}: {error_text}")
-        except Exception as e:
-            # Only log errors occasionally to avoid log spam
-            if progress % 20 < 5:  # Log errors at 0%, 20%, 40%, 60%, 80%
-                logging.error(f"Error updating job progress for {job_id}: {str(e)}")
+            # First, try to access the printer component
+            printer_accessible = False
+            server_available = hasattr(self, 'server')
+            if not server_available:
+                logging.warning(f"LMNT MONITOR: Server attribute not found on JobManager for job {job_id}. Skipping printer component check.")
+            else:
+                while attempt < max_attempts:
+                    attempt += 1
+                    try:
+                        printer = self.server.lookup_component("printer", None)
+                        if printer is None:
+                            raise ValueError("Component (printer) not found")
+                        
+                        print_stats = printer.get_print_stats()
+                        if print_stats is None:
+                            raise ValueError("Object (print_stats) not found")
+                        
+                        logging.info(f"LMNT MONITOR: Successfully accessed printer component for job {job_id}")
+                        printer_accessible = True
+                        break
+                    except Exception as e:
+                        logging.error(f"LMNT MONITOR: Exception on attempt {attempt} to get printer/print_stats for job {job_id}: {str(e)}. Retrying in {retry_delay}s...")
+                        if attempt < max_attempts:
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            logging.warning(f"LMNT MONITOR: Failed to get 'printer' component or 'print_stats' object after {max_attempts} attempts for job {job_id}. Falling back to alternative monitoring.")
         
-        return False
+            # If printer component is accessible, use it for monitoring
+            if printer_accessible:
+                while True:
+                    try:
+                        printer = self.server.lookup_component("printer")
+                        print_stats = printer.get_print_stats()
+                        state = print_stats.get("state", "unknown")
+                        progress = print_stats.get("progress", 0.0)
+                        logging.info(f"LMNT MONITOR: Print job {job_id} state: {state}, progress: {progress*100:.1f}%")
+                        
+                        # Update job status based on printer state
+                        if state == "complete":
+                            await self._update_job_status(job_id, "completed", "Print job completed")
+                            self.current_print_job = None
+                            logging.info(f"LMNT MONITOR: Print job {job_id} completed")
+                            return
+                        elif state in ["error", "cancelled"]:
+                            await self._update_job_status(job_id, "failed", f"Print job {state}")
+                            self.current_print_job = None
+                            logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {state}")
+                            return
+                        
+                        # Wait before checking again
+                        await asyncio.sleep(monitor_interval)
+                    except Exception as e:
+                        logging.error(f"LMNT MONITOR: Error monitoring print progress for job {job_id}: {str(e)}")
+                        await asyncio.sleep(monitor_interval)
+            else:
+                # Fallback to querying Klipper API directly for status if printer component is not accessible
+                logging.info(f"LMNT MONITOR: Using fallback Klipper API query for job {job_id} monitoring")
+                while True:
+                    try:
+                        # Check if klippy_apis has get_status method
+                        if hasattr(self.klippy_apis, 'get_status'):
+                            status_response = await self.klippy_apis.get_status()
+                            if status_response and 'result' in status_response:
+                                print_stats = status_response['result'].get('print_stats', {})
+                                state = print_stats.get('state', 'unknown')
+                                progress = print_stats.get('progress', 0.0)
+                                logging.info(f"LMNT MONITOR: Fallback API - Print job {job_id} state: {state}, progress: {progress*100:.1f}%")
+                                
+                                if state == "complete":
+                                    await self._update_job_status(job_id, "completed", "Print job completed")
+                                    self.current_print_job = None
+                                    logging.info(f"LMNT MONITOR: Print job {job_id} completed via fallback API")
+                                    return
+                                elif state in ["error", "cancelled"]:
+                                    await self._update_job_status(job_id, "failed", f"Print job {state}")
+                                    self.current_print_job = None
+                                    logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {state} via fallback API")
+                                    return
+                            else:
+                                logging.warning(f"LMNT MONITOR: Fallback API query failed or returned no status for job {job_id}")
+                        else:
+                            logging.warning(f"LMNT MONITOR: KlippyAPI does not have get_status method for job {job_id}. Cannot monitor progress.")
+                            # Exit monitoring loop since no further monitoring is possible
+                            return
+                    
+                        await asyncio.sleep(monitor_interval)
+                    except Exception as e:
+                        logging.error(f"LMNT MONITOR: Fallback API error monitoring print progress for job {job_id}: {str(e)}")
+                        await asyncio.sleep(monitor_interval)
+        except Exception as e:
+            logging.error(f"LMNT MONITOR: Unexpected error in print progress monitoring for job {job_id}: {str(e)}")
+            logging.error(f"LMNT MONITOR: Marking job {job_id} as failed due to unexpected monitoring error")
+            await self._update_job_status(job_id, "failed", "Unexpected error in monitoring")
+            self.current_print_job = None
     
     async def _handle_job_status(self, web_request):
         """

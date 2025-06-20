@@ -27,7 +27,19 @@ class LmntMarketplacePlugin:
     def __init__(self, config):
         self.server = config.get_server()
         self.klippy_apis = None
-        logging.info("Initializing LMNT Marketplace Plugin (modular version)")
+        logging.info("[LMNT Marketplace] Initializing LMNT Marketplace Plugin (modular version)")
+        logging.info(f"[LMNT Marketplace] Configuration parameters: {config.get_options()}")
+        
+        # Register our custom klippy_connection component - commented out as klippy.py and klippy_connection.py mods are reverted
+        # try:
+        #     # Attempt to register the custom klippy_connection component
+        #     # Use absolute import for the deployed environment
+        #     from moonraker.components import klippy_connection
+        #     self.server.register_component(klippy_connection.KlippyConnection, "klippy_connection")
+        #     logging.info("[LMNT Marketplace] Successfully registered custom klippy_connection component")
+        # except ImportError as e:
+        #     logging.error(f"[LMNT Marketplace] Error registering custom klippy_connection component: {e}")
+        #     logging.error(f"[LMNT Marketplace] Traceback: {traceback.format_exc()}")
         
         try:
             # Use a relative import to avoid path manipulation
@@ -37,38 +49,44 @@ class LmntMarketplacePlugin:
             # Initialize the modular integration
             self.integration = LmntMarketplaceIntegration(config, self.server)
             
-            logging.info("Successfully imported LmntMarketplaceIntegration using relative import")
+            logging.info("[LMNT Marketplace] Successfully imported LmntMarketplaceIntegration using relative import")
         except Exception as e:
-            logging.error(f"Error importing LmntMarketplaceIntegration: {str(e)}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
+            logging.error(f"[LMNT Marketplace] Error importing LmntMarketplaceIntegration: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Traceback: {traceback.format_exc()}")
             raise
         
         # Register server components
         self.server.register_event_handler(
             "server:klippy_ready", self._handle_klippy_ready)
+        logging.info("[LMNT Marketplace] Registered event handler for server:klippy_ready")
         self.server.register_event_handler(
             "server:klippy_shutdown", self._handle_klippy_shutdown)
         
         # Register legacy endpoints for backward compatibility
         self._register_legacy_endpoints()
         
-        logging.info("LMNT Marketplace Plugin initialized successfully")
+        logging.info("[LMNT Marketplace] LMNT Marketplace Plugin initialized successfully")
     
     async def _handle_klippy_ready(self):
         """Called when Klippy reports ready"""
-        # Get Klippy APIs
-        self.klippy_apis = self.server.lookup_component('klippy_apis')
+        self.klippy_apis = self.server.lookup_component("klippy_apis")
+        logging.info("[LMNT Marketplace] Klippy APIs initialized after klippy_ready event")
+        if hasattr(self.integration, 'on_klippy_ready'):
+            await self.integration.on_klippy_ready(self.klippy_apis)
+            logging.info("[LMNT Marketplace] Integration on_klippy_ready method called")
+        else:
+            logging.warning("[LMNT Marketplace] Integration does not have on_klippy_ready method")
         
         # Initialize the integration with Klippy APIs
         await self.integration.initialize(self.klippy_apis)
         
         # Only start job polling if not already running
         if not self.integration.job_manager.job_polling_task:
-            logging.info("LMNT Plugin: Explicitly starting job polling after Klippy ready")
+            logging.info("[LMNT Marketplace] LMNT Plugin: Explicitly starting job polling after Klippy ready")
             self.integration.job_manager.setup_job_polling()
-            logging.info("LMNT Plugin: Job polling setup completed")
+            logging.info("[LMNT Marketplace] LMNT Plugin: Job polling setup completed")
         else:
-            logging.info("LMNT Plugin: Job polling already running, skipping setup")
+            logging.info("[LMNT Marketplace] LMNT Plugin: Job polling already running, skipping setup")
     
     async def _handle_klippy_shutdown(self):
         """Called when Klippy reports shutdown"""
@@ -77,9 +95,14 @@ class LmntMarketplacePlugin:
         
     async def close(self):
         """Called when Moonraker is shutting down"""
-        logging.info("LMNT Marketplace Plugin shutting down")
+        logging.info("[LMNT Marketplace] LMNT Marketplace Plugin shutting down")
         if hasattr(self, 'integration'):
             await self.integration.close()
+    
+    def get_status(self, eventtime):
+        status = self.integration.get_status(eventtime) if hasattr(self.integration, 'get_status') else {}
+        logging.debug(f"[LMNT Marketplace] Status requested at {eventtime}: {status}")
+        return status
     
     def _register_legacy_endpoints(self):
         """Register legacy endpoints for backward compatibility"""
@@ -123,9 +146,9 @@ class LmntMarketplacePlugin:
                 auth_required=False  # Bypass Moonraker's JWT validation
             )
             
-            logging.info("Registered LMNT Marketplace legacy endpoints")
+            logging.info("[LMNT Marketplace] Registered LMNT Marketplace legacy endpoints")
         except Exception as e:
-            logging.error(f"Error registering legacy endpoints: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Error registering legacy endpoints: {str(e)}")
     
     # Legacy endpoint handlers that delegate to the modular integration
     
@@ -147,7 +170,7 @@ class LmntMarketplacePlugin:
                     if body:
                         args = jsonw.loads(body)
                 except Exception:
-                    logging.exception("Error parsing JSON request")
+                    logging.exception("[LMNT Marketplace] Error parsing JSON request")
                     raise self.server.error("Invalid JSON in request body", 400)
             
             username = args.get('username')
@@ -157,14 +180,14 @@ class LmntMarketplacePlugin:
                 raise self.server.error("Missing username or password", 400)
             
             # Log the request details
-            logging.info(f"Login request for user: {username}")
-            logging.info(f"Using CWS URL: {self.integration.cws_url}")
+            logging.info(f"[LMNT Marketplace] Login request for user: {username}")
+            logging.info(f"[LMNT Marketplace] Using CWS URL: {self.integration.cws_url}")
             
             # Delegate to the auth manager
             result = await self.integration.auth_manager.login_user(username, password)
             return result
         except Exception as e:
-            logging.error(f"Error during user login: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Error during user login: {str(e)}")
             raise self.server.error(str(e), 500)
     
     async def _handle_register_printer(self, web_request):
@@ -185,7 +208,7 @@ class LmntMarketplacePlugin:
                     if body:
                         args = jsonw.loads(body)
                 except Exception:
-                    logging.exception("Error parsing JSON request")
+                    logging.exception("[LMNT Marketplace] Error parsing JSON request")
                     raise self.server.error("Invalid JSON in request body", 400)
             
             user_token = args.get('user_token')
@@ -195,22 +218,22 @@ class LmntMarketplacePlugin:
             
             # Only use token from request body
             if not user_token:
-                logging.warning("No user_token provided in request body")
+                logging.warning("[LMNT Marketplace] No user_token provided in request body")
             else:
-                logging.info("Using token from request body")
+                logging.info("[LMNT Marketplace] Using token from request body")
             
             if not user_token or not printer_name:
                 raise self.server.error("Missing user token or printer name", 400)
             
             # Log registration request details
-            logging.info(f"Registering printer: {printer_name}, Manufacturer: {manufacturer}, Model: {model}")
+            logging.info(f"[LMNT Marketplace] Registering printer: {printer_name}, Manufacturer: {manufacturer}, Model: {model}")
             
             # Delegate to the auth manager
             result = await self.integration.auth_manager.register_printer(
                 user_token, printer_name, manufacturer, model)
             return result
         except Exception as e:
-            logging.error(f"Error during printer registration: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Error during printer registration: {str(e)}")
             raise self.server.error(str(e), 500)
     
     async def _handle_manual_check_jobs(self, web_request):
@@ -220,7 +243,7 @@ class LmntMarketplacePlugin:
             job_status = await self.integration.job_manager.get_status()
             return {"status": "success", "message": "Job status retrieved", "job_status": job_status}
         except Exception as e:
-            logging.error(f"Error initiating job check: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Error initiating job check: {str(e)}")
             raise self.server.error(str(e), 500)
     
     async def _handle_status(self, web_request):
@@ -239,7 +262,7 @@ class LmntMarketplacePlugin:
             
             return status
         except Exception as e:
-            logging.error(f"Error getting status: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Error getting status: {str(e)}")
             raise self.server.error(str(e), 500)
             
     async def _handle_refresh_token(self, web_request):
@@ -257,7 +280,7 @@ class LmntMarketplacePlugin:
             else:
                 raise self.server.error("Failed to refresh printer token", 500)
         except Exception as e:
-            logging.error(f"Error refreshing printer token: {str(e)}")
+            logging.error(f"[LMNT Marketplace] Error refreshing printer token: {str(e)}")
             raise self.server.error(str(e), 500)
 
 
