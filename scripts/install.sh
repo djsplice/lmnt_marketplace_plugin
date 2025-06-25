@@ -50,7 +50,6 @@ echo "Creating symlinks in Moonraker components directory..."
 ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace_plugin.py" "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
 ln -sf "${PLUGIN_DIR}/component/encrypted_print.py" "${COMPONENT_DIR}/encrypted_print.py"
 ln -sf "${PLUGIN_DIR}/component/encrypted_provider.py" "${COMPONENT_DIR}/encrypted_provider.py"
-ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
 
 # Copy Klipper macros if they exist
 #if [ -d "${REPO_DIR}/klipper/extras" ]; then
