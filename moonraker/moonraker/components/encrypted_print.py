@@ -5,6 +5,7 @@ import time
 import asyncio
 import base64
 import os
+import sys
 import logging
 from aiohttp import web
 from typing import Optional
@@ -12,31 +13,39 @@ from moonraker.common import UserInfo
 from moonraker.utils.exceptions import ServerError
 import traceback
 
+# Ensure the current directory is in the Python path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# Import our custom EncryptedProvider
+try:
+    from encrypted_provider import EncryptedProvider
+except ImportError:
+    logging.warning("[EncryptedPrint] Could not import EncryptedProvider, falling back to direct streaming")
+    EncryptedProvider = None
+
 def load_component(config):
     return EncryptedPrint(config)
 
 class EncryptedPrint:
     def __init__(self, config):
         self.server = config.get_server()
+        self.config = config
         self.lmnt_integration = None
-        self.file_manager = self.server.lookup_component("file_manager")
-        self.klippy_apis = self.server.lookup_component("klippy_apis")
-        self.database = self.server.lookup_component("database")
-        
-        # Note: print_stats is a Klipper object, not a Moonraker component
-        # We interact with it via klippy_apis.query_objects() and GCode commands
-        
-        # Try to get the LMNT integration on startup
-        try:
-            lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
-            # The actual integration object is stored in the integration attribute
-            self.lmnt_integration = lmnt_component.integration
-            logging.info("[EncryptedPrint] Successfully found LMNT Marketplace Plugin on startup")
-        except ServerError:
-            logging.warning("[EncryptedPrint] LMNT Marketplace Plugin not found on initial attempt, will retry during component_init")
-        
-        # Register for server initialization completion
-        self.server.register_event_handler("server:ready", self.handle_server_ready)
+        self.klippy_apis = None
+        self.database = None
+        self.file_manager = None
+        self.moonraker_pid = os.getpid()
+        self.active_memfds = {}
+
+        # Component lookups are deferred to _handle_klippy_ready to avoid load order issues
+        self.server.register_event_handler(
+            "server:klippy_ready", self._handle_klippy_ready)
+
+        # Register handler to clean up memfds on job completion
+        self.server.register_event_handler(
+            "job_state:job_state_changed", self._handle_job_state_change)
         
         # Register our endpoint
         self.server.register_endpoint(
@@ -47,21 +56,32 @@ class EncryptedPrint:
         )
         logging.info("[EncryptedPrint] Registered /server/encrypted/print endpoint")
 
-    async def handle_server_ready(self):
-        """Called when the server is fully initialized"""
-        if not self.lmnt_integration:
-            try:
-                lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
-                # The actual integration object is stored in the integration attribute
-                self.lmnt_integration = lmnt_component.integration
-                logging.info("[EncryptedPrint] Successfully found LMNT Marketplace Plugin after server ready")
-            except ServerError:
-                logging.error("[EncryptedPrint] Failed to find LMNT Marketplace Plugin even after server ready")
-        
+    async def _handle_klippy_ready(self):
+        """Called when Klippy is connected and ready"""
+        logging.info("[EncryptedPrint] Klippy ready, looking up components...")
+        try:
+            self.klippy_apis = self.server.lookup_component("klippy_apis")
+            self.database = self.server.lookup_component("database")
+            self.file_manager = self.server.lookup_component("file_manager")
+            lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
+            self.lmnt_integration = lmnt_component.integration
+            logging.info("[EncryptedPrint] All components successfully initialized.")
+        except Exception as e:
+            logging.exception(
+                "[EncryptedPrint] Failed to initialize components after Klippy ready")
+
         return False  # Return False to unregister this handler after it runs
 
     async def handle_encrypted_print(self, web_request):
         try:
+            # Check if components are initialized, wait if necessary to resolve startup race condition
+            if not all([self.klippy_apis, self.database, self.lmnt_integration, self.file_manager]):
+                logging.warning("[EncryptedPrint] Components not ready, waiting 1s for server to initialize...")
+                await asyncio.sleep(1)
+                if not all([self.klippy_apis, self.database, self.lmnt_integration, self.file_manager]):
+                    logging.error("[EncryptedPrint] Component still not ready after delay, aborting print request.")
+                    raise ServerError("EncryptedPrint component not fully initialized", 503)
+
             # Use the correct WebRequest API method to get all arguments
             data = web_request.get_args()
             logging.info(f"[EncryptedPrint] Successfully extracted request data using web_request.get_args()")
@@ -83,7 +103,7 @@ class EncryptedPrint:
             encrypted_gcode = base64.b64decode(data.get("encrypted_gcode"))
             gcode_dek_package = data.get("gcode_dek_package")
             gcode_iv_hex = data.get("gcode_iv_hex")
-            filename = data.get("filename", f"virtual_{job_id}_{int(time.time())}.gcode")
+            filename = data.get("filename", f"encrypted_{job_id}.gcode")
             if not all([job_id, encrypted_gcode, gcode_dek_package, gcode_iv_hex]):
                 raise ServerError("Missing required parameters", 400)
             
@@ -111,133 +131,113 @@ class EncryptedPrint:
             
             logging.info(f"[EncryptedPrint] Received decrypted memfd {decrypted_memfd} for job {job_id}")
             
-            # Start streaming in background task to avoid blocking the HTTP response
-            async def stream_gcode_task():
-                memfd_stream = None
-                try:
-                    logging.info(f"[EncryptedPrint] Background task starting, memfd={decrypted_memfd}")
-                    
-                    # Verify the memfd is still valid
-                    try:
-                        # Check if we can seek on the memfd (this will fail if it's closed)
-                        current_pos = os.lseek(decrypted_memfd, 0, os.SEEK_CUR)
-                        logging.info(f"[EncryptedPrint] Memfd {decrypted_memfd} is valid, current position: {current_pos}")
-                    except OSError as e:
-                        logging.error(f"[EncryptedPrint] Memfd {decrypted_memfd} is invalid: {e}")
-                        raise
-                    
-                    # Duplicate the memfd to avoid ownership issues with os.fdopen()
-                    dup_memfd = os.dup(decrypted_memfd)
-                    logging.info(f"[EncryptedPrint] Duplicated memfd {decrypted_memfd} to {dup_memfd}")
-                    
-                    # Create file object from duplicated memfd
-                    memfd_stream = os.fdopen(dup_memfd, "rb")
-                    logging.info(f"[EncryptedPrint] Created file stream from duplicated memfd {dup_memfd}")
-                    
-                    # Initialize print tracking with Moonraker and Klipper integration
-                    virtual_path = f"gcodes/{filename}"
-                    
-                    # 1. Notify file_manager of the virtual file (for UI tracking)
-                    # Note: We schedule a file change notification instead of calling non-existent methods
-                    self.file_manager._sched_changed_event("create", "gcodes", virtual_path, immediate=True)
-                    logging.info(f"[EncryptedPrint] Notified file_manager of virtual file: {virtual_path}")
-                    
-                    # 2. Set print metadata first (before starting print)
-                    metadata_cmd = f"SET_PRINT_STATS_INFO FILENAME={filename}"
-                    if 'metadata' in data and isinstance(data['metadata'], dict):
-                        if 'estimated_time' in data['metadata']:
-                            # Convert to integer seconds for Klipper
-                            estimated_seconds = int(float(data['metadata']['estimated_time']))
-                            metadata_cmd += f" TOTAL_TIME={estimated_seconds}"
-                        if 'layer_count' in data['metadata']:
-                            metadata_cmd += f" TOTAL_LAYER={data['metadata']['layer_count']}"
-                    
-                    await self.klippy_apis.run_gcode(metadata_cmd)
-                    logging.info(f"[EncryptedPrint] Set print metadata: {metadata_cmd}")
-                    
-                    # 3. Start the print
-                    # Removed the explicit PRINT_START command, instead let the GCode streaming trigger the print state change
-                    
-                    # 4. Set up job manager for proper status tracking
-                    if hasattr(self.lmnt_integration, 'job_manager') and self.lmnt_integration.job_manager:
-                        job_manager = self.lmnt_integration.job_manager
-                        if job_manager.current_print_job and job_manager.current_print_job.get('id') == job_id:
-                            logging.info(f"[EncryptedPrint] Job {job_id} already managed by JobManager, updating status to printing")
-                            await job_manager._update_job_status(job_id, "printing", "Starting GCode streaming")
-                        else:
-                            # Set this as the current print job for proper status tracking
-                            job_data = {
-                                'id': job_id,
-                                'filename': filename,
-                                'metadata': data.get('metadata', {}),
-                                'started_at': time.time()
-                            }
-                            job_manager.current_print_job = job_data
-                            job_manager.print_job_started = True
-                            
-                            # Update status to printing before streaming starts
-                            await job_manager._update_job_status(job_id, "printing", "Starting GCode streaming")
-                            
-                            # Start print progress monitoring in background
-                            asyncio.create_task(job_manager._monitor_print_progress(job_id))
-                    
-                    # Stream the decrypted GCode to Klipper
-                    success = await self.lmnt_integration.gcode_manager.stream_decrypted_gcode_from_stream(
-                        memfd_stream, job_id
-                    )
-                    
-                    if not success:
-                        logging.error(f"[EncryptedPrint] Failed to stream GCode for job {job_id}")
-                        if hasattr(self.lmnt_integration, 'job_manager') and self.lmnt_integration.job_manager:
-                            await self.lmnt_integration.job_manager._update_job_status(job_id, "failed", "GCode streaming failed")
-                        return
-                    
-                    # Use metadata from the request data
-                    metadata = data.get('metadata', {})
-                    self.lmnt_integration.gcode_manager.current_metadata = metadata
-                    logging.info(f"[EncryptedPrint] Successfully streamed job {job_id} to printer")
-                    
-                    # Update job status to indicate streaming completed successfully
-                    if hasattr(self.lmnt_integration, 'job_manager') and self.lmnt_integration.job_manager:
-                        await self.lmnt_integration.job_manager._update_job_status(job_id, "printing", "GCode streaming completed, print in progress")
-                
-                except Exception as e:
-                    logging.error(f"[EncryptedPrint] Error in background streaming task for job {job_id}: {str(e)}")
-                    if hasattr(self.lmnt_integration, 'job_manager') and self.lmnt_integration.job_manager:
-                        await self.lmnt_integration.job_manager._update_job_status(job_id, "failed", f"Streaming error: {str(e)}")
-                finally:
-                    # Ensure stream is closed (this will also close the duplicated memfd)
-                    if memfd_stream is not None:
-                        try:
-                            memfd_stream.close()
-                            logging.info(f"[EncryptedPrint] Closed file stream (and duplicated memfd)")
-                        except Exception as e:
-                            logging.warning(f"[EncryptedPrint] Error closing file stream: {e}")
-                    
-                    # Close the original memfd
-                    try:
-                        # Check if the original memfd is still valid before closing
-                        os.lseek(decrypted_memfd, 0, os.SEEK_CUR)
-                        os.close(decrypted_memfd)
-                        logging.info(f"[EncryptedPrint] Closed original memfd {decrypted_memfd}")
-                    except OSError as e:
-                        if e.errno == 9:  # Bad file descriptor
-                            logging.info(f"[EncryptedPrint] Original memfd {decrypted_memfd} already closed")
-                        else:
-                            logging.warning(f"[EncryptedPrint] Error closing original memfd {decrypted_memfd}: {e}")
-                    except Exception as e:
-                        logging.warning(f"[EncryptedPrint] Error closing original memfd {decrypted_memfd}: {e}")
+            # Extract metadata from request data
+            metadata = data.get('metadata', {})
             
-            # Start the streaming task in background
-            asyncio.create_task(stream_gcode_task())
+            # Update metadata with any additional parsed data if needed
+            await self._parse_metadata_from_memfd(decrypted_memfd, metadata)
+
+            # CRITICAL: Rewind the file descriptor after parsing metadata.
+            # The parser leaves the file pointer at the end of its read.
+            os.lseek(decrypted_memfd, 0, os.SEEK_SET)
+
+            # 1. Register the file descriptor with Klipper's bridge
+            filename = f"virtual_{job_id}_{int(time.time())}.gcode"
+            memfd_fileno = decrypted_memfd
+
+            # Track the memfd so we can close it on job completion
+            self.active_memfds[filename] = memfd_fileno
+            register_gcode = f'REGISTER_ENCRYPTED_FILE FILENAME="{filename}" PID={self.moonraker_pid} FD={memfd_fileno}'
+            try:
+                await self.klippy_apis.run_gcode(register_gcode)
+                logging.info(f"[EncryptedPrint] Successfully sent REGISTER_ENCRYPTED_FILE for {filename}")
+            except Exception as e:
+                logging.error(f"[EncryptedPrint] Error registering encrypted file with Klipper: {e}")
+                # Important: Close the memfd if registration fails to prevent leaks
+                os.close(memfd_fileno)
+                raise ServerError(f"Failed to register encrypted file with Klipper: {e}")
             
-            # Return immediately to prevent HTTP timeout
-            return {"status": "success", "job_id": job_id, "message": "Print job initiated, streaming in progress"}
+            # 2. Save metadata. This must be done first, unconditionally, to prime the
+            # cache and prevent a race condition where the UI requests metadata
+            # before it has been saved.
+            if self.file_manager:
+                gcode_metadata = self.file_manager.get_metadata_storage()
+                gcode_metadata.insert(filename, metadata)
+                logging.info(f"[EncryptedPrint] Successfully saved metadata for {filename}")
+
+                # 3. Announce the virtual file's existence to the UI.
+                # Now that the metadata is saved, the UI can safely query it.
+                self.file_manager._sched_changed_event("create", "gcodes", filename, immediate=True)
+                logging.info(f"[EncryptedPrint] Notified file manager of new virtual file: {filename}")
+
+            # 4. Start the print using the registered file. Now, when the UI is notified,
+            # the file entry will exist, and the metadata will be ready and waiting.
+            print_gcode = f'SDCARD_PRINT_FILE FILENAME={filename}'
+            try:
+                await self.klippy_apis.run_gcode(print_gcode)
+                logging.info(f"[EncryptedPrint] Successfully sent SDCARD_PRINT_FILE for {filename}")
+            except Exception as e:
+                logging.error(f"[EncryptedPrint] Error starting print for encrypted file: {e}")
+                # The bridge will clean up the fd on the Klipper side, so we don't close it here
+                raise ServerError(f"Failed to start print for encrypted file: {e}")
+
+            # NOTE: We intentionally do not close `decrypted_memfd` here.
+            # Its ownership has been passed to the Klipper process, which will manage its lifecycle.
+
+            return {"status": "ok", "message": f"Encrypted print for job {job_id} started via Klipper bridge"}
         except Exception as e:
             job_id = data.get("job_id", "unknown") if 'data' in locals() and data else "unknown"
             logging.error(f"[EncryptedPrint] Error processing job {job_id}: {str(e)}")
             logging.error(f"[EncryptedPrint] Traceback: {traceback.format_exc()}")
             raise ServerError(f"Failed to process encrypted print job: {str(e)}", 500)
+
+    def _handle_job_state_change(self, event_data):
+        job = event_data.get('job', {})
+        job_state = job.get('state')
+        filename = job.get('filename')
+
+        if job_state in ['complete', 'error', 'cancelled']:
+            if filename and filename in self.active_memfds:
+                fd_to_close = self.active_memfds.pop(filename)
+                logging.info(f"[EncryptedPrint] Job '{filename}' ended with state '{job_state}'. Attempting to clean up memfd: {fd_to_close}.")
+
+                if not isinstance(fd_to_close, int) or fd_to_close < 0:
+                    logging.warning(f"[EncryptedPrint] Invalid file descriptor value '{fd_to_close}' found for job '{filename}'. Skipping close.")
+                    return
+
+                try:
+                    # THE DEFINITIVE FIX: Defensively check if the fd is still a valid, seekable file.
+                    # An lseek on a closed fd or an unsupported fd (like a socket) will raise an OSError.
+                    os.lseek(fd_to_close, 0, os.SEEK_CUR)
+
+                    # If seek succeeds, it's our memfd. Now we can safely close it.
+                    os.close(fd_to_close)
+                    logging.info(f"[EncryptedPrint] Successfully closed memfd {fd_to_close} for job {filename}.")
+                except OSError as e:
+                    # This is the expected outcome if the fd was already closed or has been reused for a non-seekable resource like a socket.
+                    logging.warning(f"[EncryptedPrint] Did not close fd {fd_to_close} for job {filename}. It was likely invalid, already closed, or a repurposed socket. Error: {e}")
+
+    async def _parse_metadata_from_memfd(self, memfd_fd, existing_metadata):
+        """
+        Parse metadata like total layers or filament usage from the decrypted GCode in memfd.
+        """
+        dup_fd = -1  # Initialize with invalid FD
+        try:
+            # Duplicate the memfd to avoid interfering with the main stream
+            dup_fd = os.dup(memfd_fd)
+            with os.fdopen(dup_fd, 'r') as f:
+                # Seek to start
+                f.seek(0)
+                content_sample = f.read(1024 * 1024)  # Read first 1MB for metadata
+                # Implement or call a metadata parser (e.g., from lmnt_marketplace components)
+                if self.lmnt_integration and hasattr(self.lmnt_integration, 'gcode_metadata_parser'):
+                    parser = self.lmnt_integration.gcode_metadata_parser
+                    if parser:
+                        parsed_data = parser.parse_gcode_metadata(content_sample)
+                        existing_metadata.update(parsed_data)
+        except Exception as e:
+            logging.warning(f"[EncryptedPrint] Failed to parse metadata: {str(e)}")
+        return existing_metadata
 
     async def stream_gcode(self, stream, filename, job_id):
         try:
