@@ -15,7 +15,7 @@ import logging
 import asyncio
 import base64
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class GCodeManager:
     """
@@ -91,62 +91,110 @@ class GCodeManager:
             logging.error(f"Error streaming decrypted GCode{job_info}: {str(e)}")
             return None
 
-    async def stream_decrypted_gcode_from_stream(self, stream, job_id=None):
+    async def stream_decrypted_gcode_from_stream(self, decrypted_stream, total_lines, job_id, progress_callback=None, virtual_filename=None):
         """
-        Stream decrypted GCode from a provided stream object line-by-line to Klipper
+        Stream decrypted GCode from a provided stream to Klipper without writing to disk.
+        
+        Args:
+            decrypted_stream: A file-like object containing the decrypted GCode.
+            total_lines: Total number of lines in the GCode for progress tracking.
+            job_id: Job ID for logging.
+            progress_callback: Optional callback to update progress.
+            virtual_filename: Virtual filename for metadata.
+        """
+        logging.info(f"Starting to stream GCode from provided stream for job {job_id}")
+        try:
+            klippy_apis = getattr(self.integration, 'klippy_apis', None)
+            if not klippy_apis:
+                logging.error(f"No Klippy APIs available for streaming job {job_id}")
+                raise ValueError("No Klippy APIs available")
+            
+            current_line = 0
+            chunk_size = 1000  # Process 1000 lines at a time
+            chunk = []
+            
+            logging.info(f"Beginning line-by-line processing for job {job_id}, total lines: {total_lines}")
+            for line in decrypted_stream:
+                current_line += 1
+                chunk.append(line.strip())
+                
+                if len(chunk) >= chunk_size:
+                    gcode_chunk = '\n'.join(chunk)
+                    logging.info(f"Attempting to send chunk of {len(chunk)} lines, up to line {current_line} for job {job_id}")
+                    await klippy_apis.run_gcode(gcode_chunk)
+                    logging.info(f"Successfully sent chunk of {len(chunk)} lines, up to line {current_line} for job {job_id}")
+                    chunk = []
+                    
+                    if progress_callback:
+                        await progress_callback(current_line, total_lines)
+                        logging.info(f"Progress updated to {current_line}/{total_lines} for job {job_id}")
+                    
+                    await asyncio.sleep(0.1)  # Small delay to prevent overwhelming Klipper
+            
+            if chunk:
+                gcode_chunk = '\n'.join(chunk)
+                logging.info(f"Attempting to send final chunk of {len(chunk)} lines, total {current_line} for job {job_id}")
+                await klippy_apis.run_gcode(gcode_chunk)
+                logging.info(f"Successfully sent final chunk of {len(chunk)} lines, total {current_line} for job {job_id}")
+            
+            if progress_callback:
+                await progress_callback(current_line, total_lines)
+                logging.info(f"Final progress updated to {current_line}/{total_lines} for job {job_id}")
+            
+            logging.info(f"Completed streaming {current_line} lines of GCode for job {job_id}")
+        except Exception as e:
+            logging.error(f"Error streaming GCode for job {job_id}: {str(e)}", exc_info=True)
+            raise
+        finally:
+            decrypted_stream.close()
+            logging.info(f"Stream closed for job {job_id}")
+
+    async def extract_metadata_from_stream(self, stream):
+        """
+        Extract metadata from a provided stream object without streaming to Klipper
         
         Args:
             stream: A file-like object or stream containing decrypted GCode
-            job_id (str, optional): Job ID for tracking and logging
             
         Returns:
             dict: Metadata extracted from the GCode
-            None: If streaming failed
+            {}: If no metadata is found or extraction fails
         """
-        self.current_job_id = job_id
-        job_info = f" for job {job_id}" if job_id else ""
-        
+        logging.info(f"Extracting metadata from provided stream")
         try:
-            logging.info(f"Starting to stream GCode from provided stream{job_info}")
-            
-            # Begin streaming to Klipper
-            start_time = time.time()
-            line_count = 0
-            metadata = {}
-            
-            while True:
-                line = stream.readline()
-                if not line:
-                    break
-                
-                decoded_line = line.decode('utf-8').strip()
-                if not decoded_line:
-                    continue
-                
-                line_count += 1
-                
-                if line_count % 1000 == 0:
-                    elapsed = time.time() - start_time
-                    rate = line_count / elapsed if elapsed > 0 else 0
-                    logging.info(f"Streamed {line_count} lines{job_info} ({rate:.1f} lines/sec)")
-                
-                if not metadata:
-                    metadata = await self._extract_metadata_from_line(decoded_line, line_count)
-                
-                await self.klippy_apis.run_gcode(decoded_line)
-            
-            # End of streaming is implicit when G-code lines run out.
-            # Log completion
-            elapsed = time.time() - start_time
-            rate = line_count / elapsed if elapsed > 0 else 0
-            logging.info(f"Completed streaming {line_count} lines{job_info} in {elapsed:.1f}s ({rate:.1f} lines/sec)")
-            
-            # Return metadata
+            metadata = {
+                'job_id': self.current_job_id if self.current_job_id else 'unknown',
+                'timestamp': datetime.now().isoformat()
+            }
+            # First, read all lines to get total count and collect first 500
+            all_lines = []
+            for line in stream:
+                all_lines.append(line)
+                if len(all_lines) <= 500:
+                    line = line.strip()
+                    if line.startswith(';'):
+                        comment = line.lstrip('; ').strip()
+                        if '=' in comment:
+                            key, value = comment.split('=', 1)
+                            key = key.strip().replace(' ', '_').lower()
+                            value = value.strip()
+                            metadata[key] = value
+            # Then check last 500 lines if we have more than 500 total
+            start_index = max(0, len(all_lines) - 500)
+            for line in all_lines[start_index:]:
+                line = line.strip()
+                if line.startswith(';'):
+                    comment = line.lstrip('; ').strip()
+                    if '=' in comment:
+                        key, value = comment.split('=', 1)
+                        key = key.strip().replace(' ', '_').lower()
+                        value = value.strip()
+                        metadata[key] = value
+            logging.info(f"Completed metadata extraction with {len(metadata)} items from {len(all_lines)} total lines")
             return metadata
-            
         except Exception as e:
-            logging.error(f"Error streaming decrypted GCode from stream{job_info}: {str(e)}")
-            return None
+            logging.error(f"Error extracting metadata from stream: {str(e)}")
+            return {}
 
     async def _extract_metadata_from_line(self, line, line_count):
         """
@@ -174,16 +222,16 @@ class GCodeManager:
             'timestamp': datetime.now().isoformat()
         }
         
-        # Regular expressions for metadata extraction
-        layer_count_pattern = re.compile(r';LAYER_COUNT:(\d+)')
-        time_pattern = re.compile(r';TIME:(\d+)')
-        filament_pattern = re.compile(r';Filament used: (\d+\.\d+)m')
-        first_layer_height_pattern = re.compile(r';FIRST_LAYER_HEIGHT:(\d+\.\d+)')
-        layer_height_pattern = re.compile(r';LAYER_HEIGHT:(\d+\.\d+)')
-        object_height_pattern = re.compile(r';OBJECT_HEIGHT:(\d+\.\d+)')
-        nozzle_diameter_pattern = re.compile(r';NOZZLE_DIAMETER:(\d+\.\d+)')
-        filament_type_pattern = re.compile(r';FILAMENT_TYPE:(.*)')
-        generated_by_pattern = re.compile(r';Generated with (.*)')
+        # Regular expressions for metadata extraction - made case insensitive and more flexible for OrcaSlicer format
+        layer_count_pattern = re.compile(r';\s*(?:total layer number|LAYER_COUNT|LAYERCOUNT|LAYERS)\s*[:=\s]\s*(\d+)', re.IGNORECASE)
+        time_pattern = re.compile(r';\s*(?:TIME|ESTIMATED_TIME|PRINT_TIME)\s*[:=\s]\s*(\d+)', re.IGNORECASE)
+        filament_pattern = re.compile(r';\s*(?:FILAMENT_USED|FILAMENT|filament used|total filament used)\s*(?:\[mm\]|\[cm3\]|\[g\]|)\s*[:=\s]\s*([\d\.]+)(?:m|cm|mm|g)?', re.IGNORECASE)
+        first_layer_height_pattern = re.compile(r';\s*(?:FIRST_LAYER_HEIGHT|FIRST_LAYER|first layer height|first layer extrusion width|first layer thickness)\s*[:=\s]\s*([\d\.]+)(?:mm)?', re.IGNORECASE)
+        layer_height_pattern = re.compile(r';\s*(?:LAYER_HEIGHT|HEIGHT_PER_LAYER|layer height|perimeters extrusion width)\s*[:=\s]\s*([\d\.]+)(?:mm)?', re.IGNORECASE)
+        object_height_pattern = re.compile(r';\s*(?:OBJECT_HEIGHT|MODEL_HEIGHT|TOTAL_HEIGHT|max_z_height)\s*[:=\s]\s*([\d\.]+)(?:mm)?', re.IGNORECASE)
+        nozzle_diameter_pattern = re.compile(r';\s*(?:NOZZLE_DIAMETER|NOZZLE_SIZE|nozzle diameter|external perimeters extrusion width)\s*[:=\s]\s*([\d\.]+)(?:mm)?', re.IGNORECASE)
+        filament_type_pattern = re.compile(r';\s*(?:FILAMENT_TYPE|FILA_TYPE|MATERIAL|filament type)\s*[:=\s]*(.+)', re.IGNORECASE)
+        generated_by_pattern = re.compile(r';\s*(?:GENERATED_WITH|GENERATED_BY|SLICER|SOFTWARE|generated by)\s*[:=\s]*(.+)', re.IGNORECASE)
         
         # Extract metadata from the line
         if line.startswith(';'):
@@ -358,4 +406,4 @@ class GCodeManager:
                 return None
         except Exception as e:
             logging.error(f"Error loading metadata for job {job_id}: {str(e)}")
-            return None   
+            return None
