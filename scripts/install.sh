@@ -35,7 +35,9 @@ mkdir -p "${PLUGIN_DIR}/component/lmnt_marketplace"
 # Copy plugin files
 echo "Copying plugin files..."
 cp "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" "${PLUGIN_DIR}/component/"
-cp "${REPO_DIR}/moonraker/moonraker/components/hedera_slicer.py" "${PLUGIN_DIR}/component/"
+cp "${REPO_DIR}/moonraker/moonraker/components/encrypted_print.py" "${PLUGIN_DIR}/component/"
+cp "${REPO_DIR}/moonraker/moonraker/components/encrypted_provider.py" "${PLUGIN_DIR}/component/"
+
 
 # Create lmnt_marketplace directory if it doesn't exist
 mkdir -p "${PLUGIN_DIR}/component/lmnt_marketplace"
@@ -46,7 +48,8 @@ cp -r "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace/"* "${PLUGIN_
 # Create symlinks
 echo "Creating symlinks in Moonraker components directory..."
 ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace_plugin.py" "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
-ln -sf "${PLUGIN_DIR}/component/hedera_slicer.py" "${COMPONENT_DIR}/hedera_slicer.py"
+ln -sf "${PLUGIN_DIR}/component/encrypted_print.py" "${COMPONENT_DIR}/encrypted_print.py"
+ln -sf "${PLUGIN_DIR}/component/encrypted_provider.py" "${COMPONENT_DIR}/encrypted_provider.py"
 ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
 
 # Copy Klipper macros if they exist
@@ -62,18 +65,13 @@ if [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
     if ! grep -q "\[lmnt_marketplace_plugin\]" "${CONFIG_DIR}/moonraker.conf"; then
         echo -e "\n# LMNT Marketplace Plugin configuration" >> "${CONFIG_DIR}/moonraker.conf"
         echo -e "[lmnt_marketplace_plugin]" >> "${CONFIG_DIR}/moonraker.conf"
+        echo -e "\n[encrypted_print]" >> "${CONFIG_DIR}/moonraker.conf"
         echo "Added [lmnt_marketplace_plugin] to moonraker.conf"
-    fi
-    
-    if ! grep -q "\[hedera_slicer\]" "${CONFIG_DIR}/moonraker.conf"; then
-        echo -e "\n# Hedera Slicer configuration" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "[hedera_slicer]" >> "${CONFIG_DIR}/moonraker.conf"
-        echo "Added [hedera_slicer] to moonraker.conf"
     fi
 else
     echo "Warning: moonraker.conf not found at ${CONFIG_DIR}/moonraker.conf"
     echo "Please manually add the following to your moonraker.conf:"
-    echo -e "\n[lmnt_marketplace_plugin]\n\n[hedera_slicer]"
+    echo -e "\n[lmnt_marketplace_plugin]\n\n[encrypted_print]\n"
 fi
 
 echo "Installation complete!"

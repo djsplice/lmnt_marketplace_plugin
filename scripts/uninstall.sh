@@ -21,7 +21,8 @@ fi
 # Remove symlinks
 echo "Removing symlinks from Moonraker components directory..."
 rm -f "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
-rm -f "${COMPONENT_DIR}/hedera_slicer.py"
+rm -f "${COMPONENT_DIR}/encrypted_print.py"
+rm -f "${COMPONENT_DIR}/encrypted_provider.py"
 rm -f "${COMPONENT_DIR}/lmnt_marketplace"
 
 # Remove plugin directory
