@@ -122,19 +122,10 @@ class LmntMarketplaceIntegration:
         await self.gcode_manager.initialize(klippy_apis, self.http_client)
         await self.job_manager.initialize(klippy_apis, self.http_client)
         
-        # Start background tasks
-        self.eventloop.create_task(self._background_tasks())
-        
         logging.info("LMNT Marketplace Integration initialized with Klippy APIs")
     
-    async def _background_tasks(self):
-        """
-        Start background tasks for the integration
-        """
-        # Start job polling directly
-        logging.info("LMNT Integration: Directly starting job polling")
-        self.job_manager.setup_job_polling()
-        logging.info("LMNT Integration: Job polling setup completed")
+    async def on_klippy_ready(self, klippy_apis):
+        pass
     
     async def handle_klippy_shutdown(self):
         """

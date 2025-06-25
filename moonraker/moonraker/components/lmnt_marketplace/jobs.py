@@ -34,14 +34,14 @@ class JobManager:
     def __init__(self, integration):
         """Initialize the Job Manager"""
         self.integration = integration
+        self.server = self.integration.server
         self.print_job_queue = []
         self.current_print_job = None
         self.print_job_started = False
         self.job_polling_task = None
         
         # References to other managers
-        self.auth_manager = None
-        self.crypto_manager = None
+        self.http_client = None
         self.gcode_manager = None
     
     def set_auth_manager(self, auth_manager):
@@ -60,9 +60,6 @@ class JobManager:
         """Initialize with Klippy APIs and HTTP client"""
         self.klippy_apis = klippy_apis
         self.http_client = http_client
-        
-        # Start job polling
-        self.setup_job_polling()
     
     def register_endpoints(self, register_endpoint):
         """Register HTTP endpoints for job management"""
@@ -622,7 +619,11 @@ class JobManager:
                 "filename": f"virtual_{job_id}_{int(time.time())}.gcode"
             }
             async with self.http_client.post(url, json=data) as response:
-                if response.status != 200:
+                if response.status == 200:
+                    logging.info(f"LMNT PRINT: Successfully started job {job_id}, beginning progress monitoring.")
+                    loop = self.integration.server.get_event_loop()
+                    loop.create_task(self._monitor_print_progress(job_id))
+                else:
                     error_text = await response.text()
                     logging.error(f"LMNT PRINT: Failed to start job {job_id}: {error_text}")
                     await self._update_job_status(job_id, "failed", f"Print start error: {error_text}")
@@ -741,109 +742,118 @@ class JobManager:
         
         return False
     
-    async def _monitor_print_progress(self, job_id):
-        """Monitor print progress and update job status"""
-        logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
-        
-        max_attempts = 3
-        attempt = 0
-        retry_delay = 2  # seconds
-        monitor_interval = 10  # seconds between progress checks after initial connection
-        
+    async def _report_print_status(self, job, status, error_message=None):
+        """Report the final print status back to the marketplace."""
+        if not job:
+            logging.error("Cannot report print status: Missing job details")
+            return
+
+        job_id = job.get('id')
+        purchase_id = job.get('purchase_id')
+        user_id = job.get('user_id')
+
+        if not all([job_id, purchase_id, user_id]):
+            logging.error(
+                f"Cannot report print status for job {job_id}: "
+                "Missing id, purchase_id, or user_id."
+            )
+            return
+
+        if not self.integration.auth_manager.printer_token:
+            logging.error(
+                f"Cannot report print status for job {job_id}: "
+                "No printer token available"
+            )
+            return
+
+        report_url = f"{self.integration.marketplace_url}/api/report-print-status"
+        payload = {
+            "user_id": user_id,
+            "purchase_id": purchase_id,
+            "print_job_id": job_id,
+            "status": status,
+        }
+        if status == 'failure' and error_message:
+            payload['error'] = error_message
+
         try:
-            # First, try to access the printer component
-            printer_accessible = False
-            server_available = hasattr(self, 'server')
-            if not server_available:
-                logging.warning(f"LMNT MONITOR: Server attribute not found on JobManager for job {job_id}. Skipping printer component check.")
-            else:
-                while attempt < max_attempts:
-                    attempt += 1
-                    try:
-                        printer = self.server.lookup_component("printer", None)
-                        if printer is None:
-                            raise ValueError("Component (printer) not found")
-                        
-                        print_stats = printer.get_print_stats()
-                        if print_stats is None:
-                            raise ValueError("Object (print_stats) not found")
-                        
-                        logging.info(f"LMNT MONITOR: Successfully accessed printer component for job {job_id}")
-                        printer_accessible = True
-                        break
-                    except Exception as e:
-                        logging.error(f"LMNT MONITOR: Exception on attempt {attempt} to get printer/print_stats for job {job_id}: {str(e)}. Retrying in {retry_delay}s...")
-                        if attempt < max_attempts:
-                            await asyncio.sleep(retry_delay)
-                        else:
-                            logging.warning(f"LMNT MONITOR: Failed to get 'printer' component or 'print_stats' object after {max_attempts} attempts for job {job_id}. Falling back to alternative monitoring.")
-        
-            # If printer component is accessible, use it for monitoring
-            if printer_accessible:
-                while True:
-                    try:
-                        printer = self.server.lookup_component("printer")
-                        print_stats = printer.get_print_stats()
-                        state = print_stats.get("state", "unknown")
-                        progress = print_stats.get("progress", 0.0)
-                        logging.info(f"LMNT MONITOR: Print job {job_id} state: {state}, progress: {progress*100:.1f}%")
-                        
-                        # Update job status based on printer state
-                        if state == "complete":
-                            await self._update_job_status(job_id, "completed", "Print job completed")
-                            self.current_print_job = None
-                            logging.info(f"LMNT MONITOR: Print job {job_id} completed")
-                            return
-                        elif state in ["error", "cancelled"]:
-                            await self._update_job_status(job_id, "failed", f"Print job {state}")
-                            self.current_print_job = None
-                            logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {state}")
-                            return
-                        
-                        # Wait before checking again
-                        await asyncio.sleep(monitor_interval)
-                    except Exception as e:
-                        logging.error(f"LMNT MONITOR: Error monitoring print progress for job {job_id}: {str(e)}")
-                        await asyncio.sleep(monitor_interval)
-            else:
-                # Fallback to querying Klipper API directly for status if printer component is not accessible
-                logging.info(f"LMNT MONITOR: Using fallback Klipper API query for job {job_id} monitoring")
-                while True:
-                    try:
-                        # Check if klippy_apis has get_status method
-                        if hasattr(self.klippy_apis, 'get_status'):
-                            status_response = await self.klippy_apis.get_status()
-                            if status_response and 'result' in status_response:
-                                print_stats = status_response['result'].get('print_stats', {})
-                                state = print_stats.get('state', 'unknown')
-                                progress = print_stats.get('progress', 0.0)
-                                logging.info(f"LMNT MONITOR: Fallback API - Print job {job_id} state: {state}, progress: {progress*100:.1f}%")
-                                
-                                if state == "complete":
-                                    await self._update_job_status(job_id, "completed", "Print job completed")
-                                    self.current_print_job = None
-                                    logging.info(f"LMNT MONITOR: Print job {job_id} completed via fallback API")
-                                    return
-                                elif state in ["error", "cancelled"]:
-                                    await self._update_job_status(job_id, "failed", f"Print job {state}")
-                                    self.current_print_job = None
-                                    logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {state} via fallback API")
-                                    return
-                            else:
-                                logging.warning(f"LMNT MONITOR: Fallback API query failed or returned no status for job {job_id}")
-                        else:
-                            logging.warning(f"LMNT MONITOR: KlippyAPI does not have get_status method for job {job_id}. Cannot monitor progress.")
-                            # Exit monitoring loop since no further monitoring is possible
-                            return
-                    
-                        await asyncio.sleep(monitor_interval)
-                    except Exception as e:
-                        logging.error(f"LMNT MONITOR: Fallback API error monitoring print progress for job {job_id}: {str(e)}")
-                        await asyncio.sleep(monitor_interval)
+            headers = {
+                "Authorization": f"Bearer {self.integration.auth_manager.printer_token}"
+            }
+            logging.info(f"Reporting print status for job {job_id}: {payload}")
+            async with self.http_client.post(
+                report_url, headers=headers, json=payload
+            ) as response:
+                if response.status == 200:
+                    logging.info(
+                        f"Successfully reported print status for job {job_id} as {status}"
+                    )
+                else:
+                    error_text = await response.text()
+                    logging.error(
+                        f"Failed to report print status for job {job_id}. "
+                        f"Status: {response.status}, Response: {error_text}"
+                    )
         except Exception as e:
-            logging.error(f"LMNT MONITOR: Unexpected error in print progress monitoring for job {job_id}: {str(e)}")
-            logging.error(f"LMNT MONITOR: Marking job {job_id} as failed due to unexpected monitoring error")
-            await self._update_job_status(job_id, "failed", "Unexpected error in monitoring")
+            logging.error(
+                f"Exception while reporting print status for job {job_id}: {str(e)}"
+            )
+    
+    async def _monitor_print_progress(self, job_id):
+        """Monitor print progress and update job status using klippy_apis"""
+        logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
+        monitor_interval = 10
+        previous_state = "printing"  # Assume printing has just started
+
+        if self.klippy_apis is None:
+            logging.error("LMNT MONITOR: Klippy APIs not available, cannot monitor job.")
+            await self._update_job_status(job_id, "failed", "Internal error: Klippy connection not found")
+            return
+
+        while True:
+            try:
+                klipper_objects = await self.klippy_apis.query_objects({"print_stats": None})
+                print_stats = klipper_objects.get('print_stats', {})
+                current_state = print_stats.get("state", "unknown")
+                progress = print_stats.get("progress", 0.0)
+                logging.info(f"LMNT MONITOR: Print job {job_id} state: {current_state}, progress: {progress*100:.1f}%")
+
+                job = self.current_print_job
+
+                # Handle Klippy restart edge case: if state transitions from printing to standby,
+                # it implies the print finished and Klippy was restarted or went idle.
+                if previous_state == "printing" and current_state == "standby":
+                    logging.info(f"LMNT MONITOR: Detected transition from 'printing' to 'standby' for job {job_id}. Assuming successful completion.")
+                    await self._update_job_status(job_id, "completed", "Print job completed (inferred from state change)")
+                    if job:
+                        await self._report_print_status(job, "success")
+                    self.current_print_job = None
+                    return
+
+                if current_state == "complete":
+                    await self._update_job_status(job_id, "completed", "Print job completed")
+                    if job:
+                        await self._report_print_status(job, "success")
+                    self.current_print_job = None
+                    logging.info(f"LMNT MONITOR: Print job {job_id} completed")
+                    return
+                elif current_state in ["error", "cancelled"]:
+                    error_msg = f"Print job {current_state}"
+                    await self._update_job_status(job_id, "failed", error_msg)
+                    if job:
+                        await self._report_print_status(job, "failure", error_msg)
+                    self.current_print_job = None
+                    logging.error(f"LMNT MONITOR: Print job {job_id} failed with state: {current_state}")
+                    return
+
+                previous_state = current_state
+                await asyncio.sleep(monitor_interval)
+
+            except Exception as e:
+                logging.exception(f"LMNT MONITOR: Unhandled error monitoring print progress for job {job_id}")
+                await self._update_job_status(job_id, "failed", f"Internal error: {str(e)}")
+                self.current_print_job = None
+                return
             self.current_print_job = None
     
     async def _handle_job_status(self, web_request):
