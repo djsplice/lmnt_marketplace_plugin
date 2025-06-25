@@ -605,17 +605,7 @@ class JobManager:
 
             self.current_print_job = job
             self.print_job_started = True
-
-            # Home the printer if needed
-            try:
-                logging.info(f"LMNT PRINT: Homing printer before starting print")
-                await self.klippy_apis.run_gcode("G28")
-                logging.info("LMNT PRINT: Successfully homed printer")
-            except Exception as e:
-                logging.error(f"LMNT PRINT: Error homing printer: {str(e)}")
-                await self._update_job_status(job_id, "failed", f"Printer homing error: {str(e)}")
-                return False
-
+            
             # Read encrypted G-code from memfd
             memfd_file = os.fdopen(mem_fd, 'rb')
             encrypted_gcode = memfd_file.read()
