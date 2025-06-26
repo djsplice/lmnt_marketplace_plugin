@@ -370,17 +370,6 @@ The plugin uses a sophisticated in-memory file streaming technique to print encr
 
 This architecture provides the highest level of security by ensuring decrypted G-code never touches the disk, while seamlessly integrating with Klipper's native printing and UI functionalities.
 
-Summary Table
-| Step | File on Disk? | In Memory? | Streaming? | Notes | 
-|-----------------|--------------|------------|------------|----------------------------------------| 
-| Encrypted Read | Yes | Yes | No | Reads encrypted file from disk | 
-| Decrypt | No | Yes | No | Decrypts entire file in memory | 
-| Chunk/Stream | No | Yes | Yes | Streams lines to Klipper one at a time | 
-| Decrypted File | No | Yes | Yes | Never saved as a decrypted file |
-
-The file is never fully decrypted and saved to disk. The decrypted data exists only in memory and is streamed to Klipper line-by-line.
-This approach is secure (no decrypted file left on disk) and efficient, but does require enough RAM to hold the largest decrypted G-code you expect to process.
-If you want to explore true chunked decryption (decrypting and streaming in blocks, not the whole file at once), that would require a different encryption mode (not Fernet) and more complex logic.
 
 ## License
 
