@@ -4,25 +4,33 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 
 ## Installation
 
-The plugin can be installed using the provided installation scripts:
+1.  **SSH into your printer** and clone the repository:
+    ```bash
+    cd ~
+    git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
+    ```
 
-```bash
-# Clone the repository
-git clone https://github.com/your-username/encrypted_gcode_plugin.git
-cd encrypted_gcode_plugin
+2.  **Run the installation script**:
+    ```bash
+    cd ~/lmnt_marketplace_plugin
+    ./scripts/install.sh
+    ```
 
-# Run the installation script
-./scripts/install.sh
+3.  **Configure `moonraker.conf`** by adding:
+    ```ini
+    [lmnt_marketplace_plugin]
+    marketplace_url: http://192.168.1.215:8088
+    cws_url: http://192.168.1.215:8080
+    [encrypted_print]
+    ```
 
-# Or use make
-make install
+4.  **Restart services**:
+    ```bash
+    sudo systemctl restart moonraker
+    sudo systemctl restart klipper
+    ```
 
-# Restart Moonraker and Klipper
-sudo systemctl restart moonraker
-sudo systemctl restart klipper
-```
-
-For detailed installation instructions, see [Installation Guide](docs/installation.md).
+For more details, see the [Installation Guide](docs/installation.md).
 
 ## Features
 
@@ -81,80 +89,23 @@ This plugin enables a secure, end-to-end printing workflow orchestrated by the L
 
 ## Components
 
-### Moonraker Extension (`hedera_slicer.py`)
-- Handles encrypted G-code file reception and management
-- Provides `/machine/hedera_slicer/slice_and_print` API endpoint
-- Manages print job scheduling and monitoring
-- Handles file cleanup after print completion
-- Displays layer information on LCD via M117 commands
+### Encrypted Print (`encrypted_print.py`)
+- Handles in-memory decryption and streaming of encrypted G-code.
+- Provides the `/machine/encrypted_print/start_print` endpoint to initiate a secure print.
+- Manages the virtual file in Moonraker so that Klipper can see and print the file.
 
 ### LMNT Marketplace Plugin (`lmnt_marketplace_plugin.py`)
 - **Job Polling**: Periodically polls the `/api/poll-print-queue` endpoint of the LMNT Marketplace API to check for new, `ready_to_print` jobs.
 - **Secure G-code Download**: Downloads the encrypted G-code file over HTTPS from the URL provided by the API.
-- **On-Printer Decryption**: Manages the entire decryption process on the printer. It uses the cryptographic materials fetched from the API to decrypt the G-code just-in-time for printing, without writing the plaintext G-code to disk permanently.
+- **On-Printer Decryption**: Manages the entire decryption process on the printer. It uses the cryptographic materials fetched from the API to decrypt the G-code just-in-time for printing, without writing the plaintext G-code to disk.
 - **Klipper Integration**: Streams the decrypted, raw G-code lines directly to Klipper for printing.
 - **Status Reporting**: Sends real-time job status updates (`processing`, `printing`, `success`, `failure`) back to the Marketplace API.
 - **Authentication**: Manages printer registration and the secure storage and automatic refresh of printer JWTs.
 
 ### Klipper Modifications
 - Enhanced `virtual_sdcard.py` for encrypted and plaintext G-code file operations with automatic detection and fallback
-- Modified `print_stats.py` for accurate print statistics
-- Secure G-code streaming implementation
+- Secure G-code streaming implementation with `encrypted_file_bridge.py`
 - **Single source of truth for layer tracking and print statistics**
-
-## Installation
-
-### 1. Moonraker Configuration
-Add to your `moonraker.conf`:
-```ini
-[hedera_slicer]
-```
-
-### 2. NGINX Configuration
-Add to `/etc/nginx/sites-available/mainsail`:
-```nginx
-location /hedera_slicer/slice_and_print {
-    proxy_pass http://apiserver/hedera_slicer/slice_and_print;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Host $http_host;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Scheme $scheme;
-    limit_except POST {
-        deny all;
-    }
-}
-```
-
-Optionally, increase timeouts in `/etc/nginx/sites-available/default`:
-```nginx
-proxy_read_timeout 300s;
-proxy_connect_timeout 300s;
-proxy_send_timeout 300s;
-```
-
-Apply NGINX changes:
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-## Usage
-
-- Upload either encrypted or plaintext G-code files; the system will handle both transparently.
-- Start the `osx-local-app.py` slicer application
-- Send a slice request with your configuration:
-```bash
-curl -X POST \
-  -F "data={\"wallet_address\":\"YOUR_WALLET\",\"token_id\":\"ID\",\"contract_address\":\"CONTRACT\",\"encryption_key\":\"KEY\",\"uri\":\"hedera://0.0.1047\",\"print\":\"true\"}" \
-  -F "machine_settings=@printer/config.json" \
-  -F "process_settings=@process/settings.json" \
-  -F "filament=@filament/material.json" \
-  http://localhost:5000/slice
-```
-
-**Note:** The system now seamlessly switches between encrypted and plaintext G-code files, improving error handling and user experience.
 
 ## Debugging
 
@@ -163,9 +114,9 @@ View filtered Klippy logs:
 tail -n 7200 ~/printer_data/logs/klippy.log | grep -v "Stats " | grep -v "Receive: " | grep -v "Sent " | grep -v "Received " | grep Reset
 ```
 
-View Hedera Slicer logs:
+View Encrypted Print logs:
 ```bash
-cat ~/printer_data/logs/moonraker.log | grep "hedera_slicer"
+cat ~/printer_data/logs/moonraker.log | grep "encrypted_print"
 ```
 
 View LMNT Marketplace Plugin logs:
@@ -210,6 +161,7 @@ When a printer is registered using the /machine/lmnt_marketplace/register_printe
 
 ```
 POST /machine/lmnt_marketplace/register_printer
+http://mainsail.lmnt.local/machine/lmnt_marketplace/register_printer
 ```
 
 Request body:
@@ -398,42 +350,25 @@ Query file metadata:
 curl -X GET "http://localhost:7125/server/files/metadata?filename=hedera_streamed_print.gcode"
 ```
 
-## Decryption and Streaming Flow (HederaSlicer)
-1. Encrypted File is Read
-The encrypted G-code file is read entirely into memory:
-python
-CopyInsert
-with open(encrypted_filepath, "rb") as f:
-    encrypted_gcode = f.read()
+## Decryption and Printing Flow
 
-2. Decryption (In-Memory)
-The entire file is decrypted in memory using Fernet:
-python
-CopyInsert
-decrypted_gcode = cipher.decrypt(encrypted_gcode).decode()
-At this point, the entire decrypted G-code is held in memory as a string.
+The plugin uses a sophisticated in-memory file streaming technique to print encrypted files securely without ever writing the decrypted G-code to disk.
 
-3. Chunking for Streaming
-The decrypted G-code is split into lines:
-python
-CopyInsert
-lines = decrypted_gcode.splitlines()
-The code then processes these lines for metadata extraction (e.g., layer count, thumbnails, etc.).
+1.  **Job Initiation**: The process begins when the `JobManager` polls the LMNT Marketplace and receives a new job. It then makes an API call to the `EncryptedPrint` component (`/machine/encrypted_print/start_print`) to start the printing process.
 
-4. Streaming to Klipper
-The lines are sent one by one to Klipper via the STREAM_GCODE_LINE command (see lines 627–629 in your grep results):
-python
-CopyInsert
-await klippy_apis.run_gcode(f'STREAM_GCODE_LINE LINE="{escaped_line}"')
-await asyncio.sleep(0.001)  # Small delay to avoid flooding
-This is a true streaming process: the file is not saved as a decrypted file on disk; instead, it is streamed line-by-line from memory.
+2.  **In-Memory File Creation**: The `EncryptedPrint` component creates an anonymous file in memory using a Linux `memfd` (memory file descriptor). This creates a file that lives entirely in RAM and has no path on the filesystem.
 
-5. No Decrypted File on Disk
-The decrypted G-code is never written to the filesystem as a whole file. It exists only in memory during streaming. Only metadata or thumbnails might be temporarily written for inspection, but not the main G-code.
+3.  **Download and Decrypt to Memory**: The component downloads the encrypted G-code file from the URL provided by the marketplace. It decrypts the content on-the-fly and streams the plaintext G-code directly into the in-memory file. At no point is the decrypted content written to a physical disk.
 
-6. Integration with virtual_sdcard
-Klipper receives each line as if it were reading from a file, but in reality, it’s being fed lines over the API.
-This allows the print to proceed as if it was reading from a virtual SD card, but with the added security and flexibility of on-the-fly decryption and streaming.
+4.  **File Descriptor Duplication**: A crucial step for interoperability with Klipper is duplicating the memory file's descriptor using `os.dup()`. This creates a second, independent file descriptor pointing to the same in-memory file. The original descriptor is managed by the Python process, while the duplicated one is kept open and passed to a Klipper extension.
+
+5.  **Virtual File Announcement**: The plugin announces a new virtual file to Moonraker's `FileManager` (e.g., `_lmnt_encrypted_print.gcode`). This makes the print job visible in UIs like Mainsail and Fluidd, allowing for standard print controls (pause, cancel).
+
+6.  **Printing with Klipper**: The plugin instructs Klipper to print the file using the standard `SDCARD_PRINT_FILE` command, referencing the virtual filename. A small Klipper extension (`encrypted_file_bridge.py`) intercepts this, looks up the duplicated file descriptor, and hands it to Klipper's `virtual_sdcard` module.
+
+7.  **Native Klipper Streaming**: Klipper reads from the file descriptor as if it were a normal file on a physical SD card. Because the descriptor points to our in-memory file, Klipper streams the G-code directly from RAM, ensuring a secure and efficient print process.
+
+This architecture provides the highest level of security by ensuring decrypted G-code never touches the disk, while seamlessly integrating with Klipper's native printing and UI functionalities.
 
 Summary Table
 | Step | File on Disk? | In Memory? | Streaming? | Notes | 
@@ -443,8 +378,7 @@ Summary Table
 | Chunk/Stream | No | Yes | Yes | Streams lines to Klipper one at a time | 
 | Decrypted File | No | Yes | Yes | Never saved as a decrypted file |
 
-Conclusion
-You are correct: The file is never fully decrypted and saved to disk. The decrypted data exists only in memory and is streamed to Klipper line-by-line.
+The file is never fully decrypted and saved to disk. The decrypted data exists only in memory and is streamed to Klipper line-by-line.
 This approach is secure (no decrypted file left on disk) and efficient, but does require enough RAM to hold the largest decrypted G-code you expect to process.
 If you want to explore true chunked decryption (decrypting and streaming in blocks, not the whole file at once), that would require a different encryption mode (not Fernet) and more complex logic.
 

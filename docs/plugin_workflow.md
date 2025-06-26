@@ -48,90 +48,76 @@ The plugin periodically polls the marketplace to check for new print jobs assign
     *   Other relevant job details.
 5.  **Response (Success - No Job)**: If no job is available, the API returns an appropriate response (e.g., an empty list or a specific status code).
 
-## 4. G-code Processing and Printing
+## 4. G-code Decryption and Secure Streaming
 
-Once the plugin receives job details, it proceeds to fetch and print the model.
+Once the plugin receives job details, it uses a sophisticated, secure process to decrypt and print the model without ever writing the decrypted G-code to disk.
 
-1.  **Fetch Encrypted G-code**: The plugin initiates the download of the encrypted G-code. The `gcode_file_url` received from the job polling endpoint may point to the file in Google Cloud Storage (GCS). However, for security and control, the plugin typically does not access this URL directly. Instead, it calls a dedicated marketplace API endpoint (`/api/print/download-gcode`) which acts as a secure proxy to fetch the file from GCS and stream it to the plugin. This prevents direct exposure of GCS URLs to the client, and allows for secure (non-public) configuration of the GCP storage bucket.
-2.  **Decrypt G-code DEK**: This is a two-step process to securely obtain the key needed to decrypt the G-code file:
-    *   **Step 1: Retrieve the Plaintext Printer-Specific Encryption Key (PSEK) from CWS**:
-        *   The job details from the Marketplace API include `kek_encrypted_psek_for_gcode_encryption` (this is the KEK-encrypted PSEK for the printer, originally provided during printer registration).
-        *   The plugin makes a secure, authenticated call to the CWS endpoint `POST /ops/decrypt-data`.
-        *   **Request Body to CWS**: `{ "dataToDecrypt": "<base64_encoded_kek_encrypted_psek_for_gcode_encryption>" }`
-        *   CWS uses its internal `masterPrinterKekCwsId` to decrypt the provided `dataToDecrypt`.
-        *   CWS returns the base64 encoded plaintext PSEK in the `decryptedData` field of the response.
-        *   The plugin decodes this to get the plaintext PSEK in memory.
-    *   **Step 2: Decrypt the G-code Data Encryption Key (DEK) using the Plaintext PSEK**:
-        *   The job details from the Marketplace API also contain `psek_encrypted_gcode_dek` (this is the G-code DEK, which was encrypted by the Webslicer using the plaintext PSEK).
-        *   With the plaintext PSEK (from Step 1) now in memory, the plugin performs a local decryption (e.g., AES) of the `psek_encrypted_gcode_dek` to obtain the plaintext G-code DEK.
-        *   This plaintext G-code DEK is typically a Fernet key.
-3.  **Decrypt G-code**: Using the decrypted G-code DEK (which is a Fernet key), the plugin decrypts the G-code file content in-memory.
-    *   **Security Note**: Critically, the unencrypted G-code is never written to disk on the printer to maintain model IP security.
-4.  **Stream to Klipper**: The plugin streams the decrypted G-code line by line to Klipper, typically via Moonraker's `STREAM_GCODE_LINE` command or a similar mechanism.
+1.  **Fetch Encrypted G-code**: The plugin downloads the encrypted G-code by calling a marketplace API endpoint (`/api/print/download-gcode`), which acts as a secure proxy to the file's storage location (e.g., GCS).
 
-## 5. Print Status Reporting
+2.  **Decrypt G-code DEK**: The plugin securely retrieves the G-code's Data Encryption Key (DEK). This involves:
+    a.  Calling the CWS to decrypt the printer's KEK-encrypted PSEK.
+    b.  Using the now-plaintext PSEK to decrypt the `psek_encrypted_gcode_dek` locally, yielding the final G-code DEK (a Fernet key).
 
-After the print job is completed (either successfully or with an error), the plugin reports the outcome back to the marketplace.
+3.  **Decrypt G-code to In-Memory File**: Using the G-code DEK, the plugin decrypts the *entire* G-code file content. Instead of writing it to disk, it places the decrypted content into an anonymous, in-memory file using the Linux `memfd_create` syscall. 
+    *   **Security Note**: This is the core of the security model. The decrypted G-code exists only in RAM and is never stored on any physical disk, preventing unauthorized access or recovery.
 
-1.  **Reporting Endpoint**: `POST /api/report-print-status`
-2.  **Authentication**: The request must include the valid long-lived JWT.
-3.  **Request Body**: A JSON payload detailing the print outcome:
-    ```json
-    {
-      "user_id": "string", // User who owns the purchase
-      "purchase_id": "string", // Identifier for the purchase
-      "print_job_id": "string", // Identifier for this specific print attempt
-      "status": "success" | "failure", // Outcome of the print
-      "error": "string" // Optional: Error message if status is "failure"
-    }
-    ```
-4.  **Marketplace Actions**: Upon receiving the status, the marketplace API will:
-    *   If `status = "success"`: Increment `prints_used` for the purchase, log the print to HCS.
-    *   If `status = "failure"`: Log the failure to HCS, potentially trigger refund logic (details TBD).
-    *   Update the `purchases` table with the `print_status` and `print_error`.
-5.  **Response**: The API returns a confirmation of the status report, e.g.:
-    ```json
-    {
-      "status": "string", // e.g., "Reported"
-      "purchase_id": "string",
-      "print_job_id": "string",
-      "print_outcome": "string" // e.g., "success", "failure"
-    }
-    ```
+4.  **Securely Stream to Klipper via File Descriptor Bridge**: The plugin hands off the in-memory G-code to Klipper for native printing.
+    a.  **Announce Virtual File**: The plugin first notifies Moonraker's File Manager about a new virtual file (e.g., `_lmnt_encrypted_print.gcode`), so it appears correctly in UIs like Mainsail/Fluidd.
+    b.  **Duplicate File Descriptor**: It creates a duplicate of the in-memory file's descriptor using `os.dup()`. This is a critical step that allows safe ownership transfer to the Klipper process.
+    c.  **Pass Descriptor to Klipper**: The plugin executes a custom G-code command (`LOAD_ENCRYPTED_FILE FD=<fd_number>`) which is handled by a dedicated Klipper extension (`encrypted_file_bridge.py`). This command passes the integer value of the duplicated file descriptor.
+    d.  **Native Klipper Printing**: The Klipper extension passes the file descriptor to Klipper's native `virtual_sdcard` module. Klipper then reads from this descriptor as if it were a regular file on disk, enabling full, native print management (buffering, lookahead, etc.) and automatically updating its own `print_stats`.
+
+## 5. Print Status Monitoring and Reporting
+
+With Klipper handling the print natively, the plugin's role shifts to monitoring for completion.
+
+1.  **Monitor Klipper State**: The plugin starts a monitoring task (`_monitor_print_progress`) that periodically queries Klipper's `print_stats` object via Moonraker's `klippy_apis`.
+2.  **Detect Job Completion**: It robustly determines the job's end by watching the `print_stats.state` field. A transition from `"printing"` to a terminal state (`"standby"`, `"complete"`, or `"error"`) signals that the print has finished. This method is resilient to Klipper restarts.
+3.  **Report Final Status**: Once a terminal state is detected, the plugin reports the final outcome to the marketplace.
+    *   **Endpoint**: `POST /api/report-print-status`
+    *   **Authentication**: The request includes the printer's long-lived JWT.
+    *   **Request Body**: A JSON payload with the `print_job_id` and the final `status` (`"success"` or `"failure"`).
+4.  **Marketplace Actions**: The marketplace API processes the report, updates the purchase record, and logs the event.
 
 ## Workflow Diagram
 
 ```mermaid
 sequenceDiagram
     participant Plugin as LMNT Marketplace Plugin
-    participant PrinterHW as Printer Hardware (Klipper)
+    participant Klipper as Printer Firmware (Klipper)
     participant MarketplaceAPI as LMNT Marketplace API
     participant CWS as Cloud Custodial Wallet Service
-    participant GCS as Google Cloud Storage
 
-    Note over Plugin: Initial Setup: Printer Registered with Marketplace API,
-    Note over Plugin: Plugin stores JWT and KEK-encrypted PSEK.
+    Note over Plugin: Initial Setup: Printer Registered, JWT and KEK-encrypted PSEK stored.
 
     loop Job Polling
         Plugin->>+MarketplaceAPI: GET /api/get-print-job (Auth: JWT)
-        MarketplaceAPI-->>-Plugin: { print_job_id, gcode_download_url_proxy, psek_encrypted_gcode_dek, kek_encrypted_psek_for_gcode_encryption, ... }
+        MarketplaceAPI-->>-Plugin: { print_job_id, ... }
     end
 
-    Plugin->>+MarketplaceAPI: GET /api/print/download-gcode?job_id=xxx (Auth: JWT)
-    MarketplaceAPI->>+GCS: Fetch Encrypted G-code for job_id
-    GCS-->>-MarketplaceAPI: Encrypted G-code File
-    MarketplaceAPI-->>-Plugin: Stream/Return Encrypted G-code File
+    Note over Plugin: Job Received. Start G-code processing.
+    Plugin->>+MarketplaceAPI: GET /api/print/download-gcode (Auth: JWT)
+    MarketplaceAPI-->>-Plugin: Return Encrypted G-code File
 
-    Note over Plugin: Prepare to decrypt G-code DEK
-    Plugin->>+CWS: POST /ops/decrypt-data (Auth: Service JWT, body: { dataToDecrypt: kek_encrypted_psek_for_gcode_encryption })
-    CWS-->>-Plugin: { decryptedData: <plaintext_PSEK_base64> }
-    Plugin->>Plugin: Decode plaintext PSEK
-    Plugin->>Plugin: Decrypt psek_encrypted_gcode_dek (using plaintext PSEK) to get plaintext G-code DEK
+    Note over Plugin: Retrieve plaintext G-code DEK
+    Plugin->>+CWS: POST /ops/decrypt-data (body: { kek_encrypted_psek... })
+    CWS-->>-Plugin: { decryptedData: <plaintext_PSEK> }
+    Plugin->>Plugin: Decrypt G-code DEK with plaintext PSEK
 
-    Note over Plugin: Decrypts G-code file in-memory (using plaintext G-code DEK)
+    Note over Plugin: Decrypt G-code to in-memory file (memfd)
+    Plugin->>Plugin: Decrypts G-code to memfd, gets file descriptor (fd)
+    Plugin->>Plugin: Duplicates fd with os.dup() -> new_fd
 
-    Plugin->>PrinterHW: Stream G-code line by line
-    PrinterHW-->>Plugin: Print progress/completion
+    Note over Plugin: Hand off to Klipper for native printing
+    Plugin->>Klipper: G-code: LOAD_ENCRYPTED_FILE FD=new_fd
+    Note over Klipper: virtual_sdcard now reads from new_fd
+
+    loop Print Monitoring
+        Plugin->>+Klipper: Query klippy_apis for print_stats
+        Klipper-->>-Plugin: { "state": "printing", "progress": 0.25, ... }
+    end
+
+    Note over Plugin: Detects state change from "printing" to "standby"
 
     alt Print Successful
         Plugin->>+MarketplaceAPI: POST /api/report-print-status (Auth: JWT, status: "success")

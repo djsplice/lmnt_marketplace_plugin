@@ -4,111 +4,66 @@ This guide provides instructions for installing the LMNT Marketplace Plugin for 
 
 ## Prerequisites
 
-- A Klipper/Moonraker installation
-- SSH access to your printer
-- Git installed on your printer
+- A working Klipper/Moonraker installation.
+- SSH access to your printer.
+- `git` installed on your printer.
 
-## Installation Methods
+## Installation
 
-### Method 1: Automatic Installation (Recommended)
+1.  **SSH into your printer** and navigate to your home directory:
+    ```bash
+    cd ~
+    ```
 
-1. SSH into your printer
-2. Clone the repository:
-   ```bash
-   cd ~
-   git clone https://github.com/your-username/encrypted_gcode_plugin.git
-   cd encrypted_gcode_plugin
-   ```
+2.  **Clone the repository**:
+    ```bash
+    git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
+    ```
 
-3. Run the installation script:
-   ```bash
-   ./scripts/install.sh
-   ```
+3.  **Run the installation script**:
+    ```bash
+    cd ~/lmnt_marketplace_plugin
+    ./scripts/install.sh
+    ```
+    This script will copy the necessary plugin files and create symlinks in your Moonraker components directory.
 
-4. Restart Moonraker and Klipper:
-   ```bash
-   sudo systemctl restart moonraker
-   sudo systemctl restart klipper
-   ```
+4.  **Add the plugin configuration** to your `moonraker.conf` file. You can usually find this file at `~/printer_data/config/moonraker.conf`. Add the following lines:
+    ```ini
+    [lmnt_marketplace_plugin]
 
-### Method 2: Using Make
+    [encrypted_print]
+    ```
 
-1. SSH into your printer
-2. Clone the repository:
-   ```bash
-   cd ~
-   git clone https://github.com/your-username/encrypted_gcode_plugin.git
-   cd encrypted_gcode_plugin
-   ```
-
-3. Run make install:
-   ```bash
-   make install
-   ```
-
-4. Restart Moonraker and Klipper:
-   ```bash
-   sudo systemctl restart moonraker
-   sudo systemctl restart klipper
-   ```
-
-### Method 3: Manual Installation
-
-1. SSH into your printer
-2. Create a directory for the plugin:
-   ```bash
-   mkdir -p ~/lmnt-marketplace/component
-   mkdir -p ~/lmnt-marketplace/component/lmnt_marketplace
-   ```
-
-3. Copy the plugin files:
-   ```bash
-   cp ~/encrypted_gcode_plugin/moonraker/moonraker/components/lmnt_marketplace_plugin.py ~/lmnt-marketplace/component/
-   cp ~/encrypted_gcode_plugin/moonraker/moonraker/components/hedera_slicer.py ~/lmnt-marketplace/component/
-   cp -r ~/encrypted_gcode_plugin/moonraker/moonraker/components/lmnt_marketplace/* ~/lmnt-marketplace/component/lmnt_marketplace/
-   ```
-
-4. Create symlinks in Moonraker's components directory:
-   ```bash
-   ln -sf ~/lmnt-marketplace/component/lmnt_marketplace_plugin.py ~/moonraker/moonraker/components/lmnt_marketplace_plugin.py
-   ln -sf ~/lmnt-marketplace/component/hedera_slicer.py ~/moonraker/moonraker/components/hedera_slicer.py
-   ln -sf ~/lmnt-marketplace/component/lmnt_marketplace ~/moonraker/moonraker/components/lmnt_marketplace
-   ```
-
-5. Add the plugin configuration to your moonraker.conf:
-   ```
-   [lmnt_marketplace_plugin]
-   
-   [hedera_slicer]
-   ```
-
-6. Restart Moonraker and Klipper:
-   ```bash
-   sudo systemctl restart moonraker
-   sudo systemctl restart klipper
-   ```
+5.  **Restart Moonraker and Klipper** for the changes to take effect:
+    ```bash
+    sudo systemctl restart moonraker
+    sudo systemctl restart klipper
+    ```
 
 ## Updating the Plugin
 
-To update the plugin to the latest version:
+To update the plugin to the latest version, pull the latest changes from the repository and run the update script.
 
-```bash
-cd ~/encrypted_gcode_plugin
-git pull
-./scripts/update.sh
-sudo systemctl restart moonraker
-sudo systemctl restart klipper
-```
+1.  **Navigate to the repository directory**:
+    ```bash
+    cd ~/lmnt_marketplace_plugin
+    ```
 
-Or using make:
+2.  **Pull the latest changes**:
+    ```bash
+    git pull
+    ```
 
-```bash
-cd ~/encrypted_gcode_plugin
-git pull
-make update
-sudo systemctl restart moonraker
-sudo systemctl restart klipper
-```
+3.  **Run the update script**:
+    ```bash
+    ./scripts/update.sh
+    ```
+
+4.  **Restart Moonraker and Klipper** to apply the updates:
+    ```bash
+    sudo systemctl restart moonraker
+    sudo systemctl restart klipper
+    ```
 
 ## Uninstalling the Plugin
 

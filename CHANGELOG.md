@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.6] - 2025-06-25
+
+### Fixed
+- **Print Monitoring Stability**: Resolved a critical race condition where the print monitor would fail if Klippy was not immediately ready on startup. The monitor now reliably uses `klippy_apis` to query print status, removing the fragile dependency on the `printer` component.
+- **Redundant Polling Loops**: Eliminated a `RuntimeError` caused by multiple, concurrent job polling loops. The polling mechanism is now initialized only once, ensuring stable background operation.
+- **Stuck Print Jobs**: Corrected an issue where print jobs would remain in the "printing" state indefinitely if Klippy was restarted mid-print. The monitor now intelligently detects the state transition from `printing` to `standby` as a successful job completion.
+
+### Improved
+- **System Resilience**: The overall stability of the print job lifecycle has been significantly hardened against common operational issues like service restarts.
+- **Code Simplification**: Refactored component interactions to be cleaner and more robust, reducing complexity and potential points of failure.
+
+## [1.0.6] - 2025-06-25
+
+### Fixed
+- **Print Monitoring Stability**: Resolved a critical race condition where the print monitor would fail if Klippy was not immediately ready on startup. The monitor now reliably uses `klippy_apis` to query print status, removing the fragile dependency on the `printer` component.
+- **Redundant Polling Loops**: Eliminated a `RuntimeError` caused by multiple, concurrent job polling loops. The polling mechanism is now initialized only once, ensuring stable background operation.
+- **Stuck Print Jobs**: Corrected an issue where print jobs would remain in the "printing" state indefinitely if Klippy was restarted mid-print. The monitor now intelligently detects the state transition from `printing` to `standby` as a successful job completion.
+
+### Improved
+- **System Resilience**: The overall stability of the print job lifecycle has been significantly hardened against common operational issues like service restarts.
+- **Code Simplification**: Refactored component interactions to be cleaner and more robust, reducing complexity and potential points of failure.
+
 ## [1.0.5] - 2025-06-12
 
 ### Fixed
