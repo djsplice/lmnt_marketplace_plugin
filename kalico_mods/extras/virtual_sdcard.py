@@ -76,6 +76,7 @@ class VirtualSDGCodeProvider:
             self.current_file = None
             self.filename = ""
         self.file_position = self.file_size = 0
+        self.next_file_position = 0
 
     def get_gcode(self):
         logging.info("Starting SD card print (position %d)", self.file_position)
@@ -177,27 +178,27 @@ class VirtualSDGCodeProvider:
             return 0.0
 
     def load_file(self, gcmd, filename, check_subdirs=False):
-        files = self.get_file_list(check_subdirs)
-        flist = [f[0] for f in files]
+        self.reset()
+        # Find case-insensitive match for file
         try:
-            # First, try to find the file on the regular filesystem
-            files_by_lower = {f.lower(): f for f in self.get_file_list(check_subdirs)}
+            files_by_lower = {
+                f[0].lower(): f[0] for f in self.get_file_list(check_subdirs)
+            }
             fname = files_by_lower[filename.lower()]
         except KeyError:
-            # File not found on sdcard, it might be an encrypted virtual file
-            # We'll check the encrypted bridge in the next step. Pass for now.
-            pass
+            raise gcmd.error("Unable to open file '%s'" % (filename,))
+
+        # Open file and set state
         try:
-            if fname not in flist:
-                fname = files_by_lower[filename.lower()]
-            fname = os.path.join(self.sdcard_dirname, fname)
-            f = io.open(fname, "r", newline="")
+            full_path = os.path.join(self.sdcard_dirname, fname)
+            f = io.open(full_path, "r", newline="")
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
             f.seek(0)
-        except:
+        except Exception:
             logging.exception("virtual_sdcard file open")
-            raise gcmd.error("Unable to open file")
+            raise gcmd.error("Unable to open file '%s'" % (filename,))
+
         gcmd.respond_raw("File opened: %s Size: %d" % (filename, fsize))
         gcmd.respond_raw("File selected")
         self.current_file = f
@@ -399,26 +400,38 @@ class VirtualSD:
 
         # Try loading from the encrypted file bridge first
         encrypted_file_bridge = self.printer.lookup_object('encrypted_file_bridge', None)
-        if encrypted_file_bridge:
+        if encrypted_file_bridge is not None:
             file_handle = encrypted_file_bridge.get_file_handle(filename)
-            if file_handle:
-                logging.info(f"Loading file '{filename}' from EncryptedFileBridge.")
-                self.virtualsd_gcode_provider.load_file_from_handle(gcmd, file_handle, filename)
-                self._set_gcode_provider(self.virtualsd_gcode_provider)
-                self.do_resume()
-                return
+            if file_handle is not None:
+                logging.info(
+                    "Loading file '%s' from EncryptedFileBridge.", filename
+                )
+                try:
+                    self.virtualsd_gcode_provider.load_file_from_handle(
+                        gcmd, file_handle, filename
+                    )
+                    self.print_with_gcode_provider(self.virtualsd_gcode_provider)
+                    return
+                except Exception as e:
+                    logging.exception(
+                        "Error loading file from encrypted file bridge"
+                    )
+                    # Ensure we reset state on failure
+                    self._reset_print()
+                    raise gcmd.error(f"Error loading encrypted file: {e}")
 
-        # If that fails, try loading from the filesystem
+        # Fallback to regular file loading
+        logging.info("Attempting to load file '%s' from sdcard.", filename)
         try:
-            self.virtualsd_gcode_provider.load_file(gcmd, filename, check_subdirs=True)
-            self._set_gcode_provider(self.virtualsd_gcode_provider)
-            self.do_resume()
-            logging.info(f"Starting print of '{filename}' from filesystem.")
-            return
+            self.virtualsd_gcode_provider.load_file(
+                gcmd, filename, self.virtualsd_gcode_provider.with_subdirs
+            )
+            self.print_with_gcode_provider(self.virtualsd_gcode_provider)
         except Exception as e:
-            logging.warning(f"Could not load '{filename}' from sdcard. Error: {e}")
-
-        raise gcmd.error(f"Unable to open file '{filename}'")
+            self._reset_print()
+            logging.exception("virtual_sdcard file load failed")
+            # Re-raise the original error to provide a clear message in the UI
+            raise gcmd.error(str(e))
 
     def cmd_M23(self, gcmd):
         # Select SD file
