@@ -89,12 +89,12 @@ This plugin enables a secure, end-to-end printing workflow orchestrated by the L
 
 ## Components
 
-### Encrypted Print (`encrypted_print.py`)
+### Moonraker: Encrypted Print (`encrypted_print.py`)
 - Handles in-memory decryption and streaming of encrypted G-code.
 - Provides the `/machine/encrypted_print/start_print` endpoint to initiate a secure print.
 - Manages the virtual file in Moonraker so that Klipper can see and print the file.
 
-### LMNT Marketplace Plugin (`lmnt_marketplace_plugin.py`)
+### Moonraker: LMNT Marketplace Plugin (`lmnt_marketplace_plugin.py`)
 - **Job Polling**: Periodically polls the `/api/poll-print-queue` endpoint of the LMNT Marketplace API to check for new, `ready_to_print` jobs.
 - **Secure G-code Download**: Downloads the encrypted G-code file over HTTPS from the URL provided by the API.
 - **On-Printer Decryption**: Manages the entire decryption process on the printer. It uses the cryptographic materials fetched from the API to decrypt the G-code just-in-time for printing, without writing the plaintext G-code to disk.
@@ -102,9 +102,9 @@ This plugin enables a secure, end-to-end printing workflow orchestrated by the L
 - **Status Reporting**: Sends real-time job status updates (`processing`, `printing`, `success`, `failure`) back to the Marketplace API.
 - **Authentication**: Manages printer registration and the secure storage and automatic refresh of printer JWTs.
 
-### Robust G-code Macro Implementation
+### Klipper: G-code Macro Implementation (`secure_print.py`)
 
-The plugin integrates with Klipper's `virtual_sdcard.py` to handle the printing of encrypted G-code files. This is achieved without any modifications to Klipper's source code by leveraging a G-code macro in `printer.cfg`.
+This plugin integrates with Klipper's `virtual_sdcard.py` to handle the printing of encrypted G-code files. This is achieved without modifying Klipper's source code by leveraging a G-code macro in `printer.cfg`.
 
 This macro intercepts the `SDCARD_PRINT_FILE` command, inspects the filename, and intelligently routes the request:
 - **Encrypted Files** (e.g., `virtual_...`): Are sent to the plugin's `SET_GCODE_FD` command for secure, in-memory printing.
