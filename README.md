@@ -24,7 +24,26 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
     [encrypted_print]
     ```
 
-4.  **Restart services**:
+4.  **Add the Klipper plugin configuration** to your `printer.cfg` file. You can usually find this file at `~/printer_data/config/printer.cfg`. Add the following lines:
+    ```ini
+    [encrypted_file_bridge]
+    
+    [secure_print]
+    ```
+
+5.  **Add the G-code macro configuration** to your `printer.cfg` file. You can usually find this file at `~/printer_data/config/printer.cfg`. Add the following lines:
+    ```ini
+    [gcode_macro SDCARD_PRINT_FILE]
+    rename_existing: BASE_SDCARD_PRINT_FILE
+    gcode:
+        {% if params.FILENAME is defined and params.FILENAME.startswith('virtual_') %}
+            SET_GCODE_FD FILENAME="{params.FILENAME}"
+        {% else %}
+            BASE_SDCARD_PRINT_FILE {rawparams}
+        {% endif %}
+    ```
+    
+6.  **Restart services**:
     ```bash
     sudo systemctl restart moonraker
     sudo systemctl restart klipper
