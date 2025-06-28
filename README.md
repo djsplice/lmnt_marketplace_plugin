@@ -102,10 +102,15 @@ This plugin enables a secure, end-to-end printing workflow orchestrated by the L
 - **Status Reporting**: Sends real-time job status updates (`processing`, `printing`, `success`, `failure`) back to the Marketplace API.
 - **Authentication**: Manages printer registration and the secure storage and automatic refresh of printer JWTs.
 
-### Klipper Modifications
-- Enhanced `virtual_sdcard.py` for encrypted and plaintext G-code file operations with automatic detection and fallback
-- Secure G-code streaming implementation with `encrypted_file_bridge.py`
-- **Single source of truth for layer tracking and print statistics**
+### Robust G-code Macro Implementation
+
+The plugin integrates with Klipper's `virtual_sdcard.py` to handle the printing of encrypted G-code files. This is achieved without any modifications to Klipper's source code by leveraging a G-code macro in `printer.cfg`.
+
+This macro intercepts the `SDCARD_PRINT_FILE` command, inspects the filename, and intelligently routes the request:
+- **Encrypted Files** (e.g., `virtual_...`): Are sent to the plugin's `SET_GCODE_FD` command for secure, in-memory printing.
+- **Standard Files**: Are passed directly to the original Klipper command, ensuring normal functionality is unaffected.
+
+This approach guarantees stability, maintainability, and seamless compatibility with future Klipper updates.
 
 ## Debugging
 

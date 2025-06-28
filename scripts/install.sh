@@ -52,11 +52,11 @@ ln -sf "${PLUGIN_DIR}/component/encrypted_print.py" "${COMPONENT_DIR}/encrypted_
 ln -sf "${PLUGIN_DIR}/component/encrypted_provider.py" "${COMPONENT_DIR}/encrypted_provider.py"
 
 # Copy Klipper macros if they exist
-#if [ -d "${REPO_DIR}/klipper/extras" ]; then
-#    echo "Copying Klipper extensions..."
-#    mkdir -p "${KLIPPER_DIR}/klippy/extras"
-#    cp "${REPO_DIR}/klipper/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
-#fi
+if [ -d "${REPO_DIR}/kalico_mods/extras" ]; then
+    echo "Copying Klipper Plugin..."
+    mkdir -p "${KLIPPER_DIR}/klippy/extras"
+    cp "${REPO_DIR}/kalico_mods/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
+fi
 
 # Update moonraker.conf
 echo "Updating moonraker.conf..."
@@ -76,4 +76,4 @@ fi
 echo "Installation complete!"
 echo "Please restart Moonraker and Klipper to activate the plugin:"
 echo "sudo systemctl restart moonraker"
-#echo "sudo systemctl restart klipper"
+echo "sudo systemctl restart klipper"

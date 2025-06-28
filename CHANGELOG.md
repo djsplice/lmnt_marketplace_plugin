@@ -1,6 +1,10 @@
 # Changelog
 
-## [1.0.6] - 2025-06-25
+## [1.1.0] - 2025-06-25
+Git tag v0.2
+
+### Added
+- **Major Improvement**: Re-architected the encrypted print job interception logic to use a Klipper G-code macro instead of modifying or patching `virtual_sdcard.py`. This new method is 100% non-invasive, ensuring Klipper's core files remain stock. It provides a more stable, maintainable, and robust solution for both encrypted and clear-text printing.
 
 ### Fixed
 - **Print Monitoring Stability**: Resolved a critical race condition where the print monitor would fail if Klippy was not immediately ready on startup. The monitor now reliably uses `klippy_apis` to query print status, removing the fragile dependency on the `printer` component.
@@ -11,7 +15,8 @@
 - **System Resilience**: The overall stability of the print job lifecycle has been significantly hardened against common operational issues like service restarts.
 - **Code Simplification**: Refactored component interactions to be cleaner and more robust, reducing complexity and potential points of failure.
 
-## [1.0.5] - 2025-06-12
+## [1.0.5] - 2025-06-12 
+Git tag v0.1
 
 ### Fixed
 - **G-code Streaming**: Resolved the 'Unknown command:"STREAM_GCODE_LINE"' error by sending raw G-code lines directly to Klipper, enabling successful printing.
@@ -77,7 +82,7 @@
 Fully functional end-to-end, including layer count updates.
 
 ### Added
-- Initial release of encrypted G-code plugin system
+
 - Moonraker extension (hedera_slicer.py) for handling encrypted G-code files
 - Modified Klipper components for secure G-code processing:
   - Enhanced virtual_sdcard.py for encrypted file operations
