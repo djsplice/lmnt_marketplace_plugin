@@ -186,12 +186,12 @@ Response:
 
 ### Printer Registration
 
-Endpoint to register a printer with the LMNT Marketplace. This will register the printer with the LMNT Marketplace and return a printer JWT and ability to use a PSEK key by calling the Custodial Wallet Service (CWS) to decrypt the PSEK given the locally stored kek_id.
+Endpoint to register a printer with the LMNT Marketplace. On first registration, this generates a permanent public/private keypair on the printer, sending the public key to the marketplace. It returns a printer-specific JWT for authenticating future requests.
 
 When a printer is registered using the /machine/lmnt_marketplace/register_printer endpoint, the API returns the following key-related material:
 
 1. `printer_token`: This is a JSON Web Token (JWT) that is unique to the registered printer. The printer uses this token to authenticate itself for future communications with the LMNT Marketplace API, such as polling for print jobs or refreshing its token.
-2. `kek_id`: This field contains an identifier for a Key Encryption Key (KEK). The KEK is managed by the Custodial Wallet Service (CWS) and is used to encrypt the printer's unique Printer-Specific Encryption Key (PSEK). The printer doesn't receive the plaintext PSEK directly during registration. Instead, it receives this kek_id. Later, when the printer needs to decrypt a G-code file, it will interact with the CWS, using its printer_token for authentication and providing the kek_id (and the encrypted G-code DEK) to have the CWS perform the necessary decryption operations to retrieve the G-code DEK.
+2. **`gcode_dek_package`**: This field contains the job's Data Encryption Key (DEK), which has been encrypted using the printer's public key. The printer uses its unique, on-device private key to decrypt this package, revealing the DEK needed to decrypt the G-code file. This ensures that only the target printer can ever decrypt the file.
 
 ```
 POST /machine/lmnt_marketplace/register_printer
@@ -339,7 +339,7 @@ python test_marketplace_integration.py --debug
 ```
 
 This script tests:
-- User login to the Custodial Wallet Service (CWS)
+
 - Printer registration with the Marketplace API
 - Printer token refresh flow
 - PSEK decryption via CWS
