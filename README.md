@@ -49,7 +49,7 @@ For more details, see the [Installation Guide](docs/installation.md).
 The plugin can be configured in the `moonraker.conf` file. Here's an example configuration:
 
 ```ini
-[lmnt_marketplace]
+[lmnt_marketplace_plugin]
 check_interval: 60
 debug_mode: False
 marketplace_url: https://api.lmnt.market
