@@ -51,6 +51,16 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 
 For more details, see the [Installation Guide](docs/installation.md).
 
+## Printer Registration and Key Management
+
+This plugin uses a robust public-key cryptography system to ensure that only your printer can decrypt and print your files.
+
+1.  **Key Generation**: When you register your printer with the LMNT Marketplace for the first time, the plugin automatically generates a unique and permanent **public/private keypair** on your printer.
+2.  **Private Key**: The private key is stored securely on your printer and **never leaves the device**. It is your printer's unique secret for decrypting job-specific keys.
+3.  **Public Key**: The public key is sent to the LMNT Marketplace and linked to your account.
+4.  **Secure Job Creation**: When a new print job is created, the marketplace encrypts the G-code with a temporary, single-use key. It then encrypts that temporary key using your printer's public key.
+5.  **Decryption**: Only your printer, with its unique private key, can decrypt the temporary key and, in turn, decrypt the G-code file. This ensures end-to-end security for your print jobs.
+
 ## Features
 
 - Secure G-code file handling with Fernet encryption
