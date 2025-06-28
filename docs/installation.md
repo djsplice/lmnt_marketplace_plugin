@@ -27,14 +27,33 @@ This guide provides instructions for installing the LMNT Marketplace Plugin for 
     ```
     This script will copy the necessary plugin files and create symlinks in your Moonraker components directory.
 
-4.  **Add the plugin configuration** to your `moonraker.conf` file. You can usually find this file at `~/printer_data/config/moonraker.conf`. Add the following lines:
+4.  **Add the Moonraker plugin configuration** to your `moonraker.conf` file. You can usually find this file at `~/printer_data/config/moonraker.conf`. Add the following lines:
     ```ini
     [lmnt_marketplace_plugin]
 
     [encrypted_print]
     ```
 
-5.  **Restart Moonraker and Klipper** for the changes to take effect:
+5.  **Add the Klipper plugin configuration** to your `printer.cfg` file. You can usually find this file at `~/printer_data/config/printer.cfg`. Add the following lines:
+    ```ini
+    [encrypted_file_bridge]
+    
+    [secure_print]
+    ```
+
+6.  **Add the G-code macro configuration** to your `printer.cfg` file. You can usually find this file at `~/printer_data/config/printer.cfg`. Add the following lines:
+    ```ini
+    [gcode_macro SDCARD_PRINT_FILE]
+    rename_existing: BASE_SDCARD_PRINT_FILE
+    gcode:
+        {% if params.FILENAME is defined and params.FILENAME.startswith('virtual_') %}
+            SET_GCODE_FD FILENAME="{params.FILENAME}"
+        {% else %}
+            BASE_SDCARD_PRINT_FILE {rawparams}
+        {% endif %}
+    ```
+
+7.  **Restart Moonraker and Klipper** for the changes to take effect:
     ```bash
     sudo systemctl restart moonraker
     sudo systemctl restart klipper

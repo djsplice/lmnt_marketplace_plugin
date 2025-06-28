@@ -61,11 +61,12 @@ Once the plugin receives job details, it uses a sophisticated, secure process to
 3.  **Decrypt G-code to In-Memory File**: Using the G-code DEK, the plugin decrypts the *entire* G-code file content. Instead of writing it to disk, it places the decrypted content into an anonymous, in-memory file using the Linux `memfd_create` syscall. 
     *   **Security Note**: This is the core of the security model. The decrypted G-code exists only in RAM and is never stored on any physical disk, preventing unauthorized access or recovery.
 
-4.  **Securely Stream to Klipper via File Descriptor Bridge**: The plugin hands off the in-memory G-code to Klipper for native printing.
-    a.  **Announce Virtual File**: The plugin first notifies Moonraker's File Manager about a new virtual file (e.g., `_lmnt_encrypted_print.gcode`), so it appears correctly in UIs like Mainsail/Fluidd.
-    b.  **Duplicate File Descriptor**: It creates a duplicate of the in-memory file's descriptor using `os.dup()`. This is a critical step that allows safe ownership transfer to the Klipper process.
-    c.  **Pass Descriptor to Klipper**: The plugin executes a custom G-code command (`LOAD_ENCRYPTED_FILE FD=<fd_number>`) which is handled by a dedicated Klipper extension (`encrypted_file_bridge.py`). This command passes the integer value of the duplicated file descriptor.
-    d.  **Native Klipper Printing**: The Klipper extension passes the file descriptor to Klipper's native `virtual_sdcard` module. Klipper then reads from this descriptor as if it were a regular file on disk, enabling full, native print management (buffering, lookahead, etc.) and automatically updating its own `print_stats`.
+4.  **Securely Stream to Klipper via G-Code Macro Bridge**: The plugin hands off the in-memory G-code to Klipper for native printing using a non-invasive G-code macro.
+    a.  **Duplicate File Descriptor**: The plugin creates a duplicate of the in-memory file's descriptor using `os.dup()`. This is a critical step that allows safe ownership transfer to the Klipper process.
+    b.  **Register FD with Secure Print Module**: The plugin calls its own Klipper extension (`secure_print.py`) via a custom `SET_GCODE_FD FD=<fd_number>` command. This makes the file descriptor available within the Klipper environment.
+    c.  **Initiate Print via Virtual Filename**: The plugin tells Moonraker to start a print using the standard `SDCARD_PRINT_FILE` command, but with a specially crafted filename (e.g., `FILENAME=virtual_12345.gcode`).
+    d.  **Macro Interception**: A G-code macro in `printer.cfg` intercepts the `SDCARD_PRINT_FILE` command. Seeing the `virtual_` prefix, it redirects the call to the `secure_print.py` module.
+    e.  **Native Klipper Printing**: The `secure_print` module retrieves the file descriptor registered in step (b) and passes it to Klipper's `virtual_sdcard` module. Klipper then reads from this descriptor as if it were a regular file on disk, enabling full, native print management and statistics.
 
 ## 5. Print Status Monitoring and Reporting
 

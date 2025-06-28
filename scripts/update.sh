@@ -40,20 +40,10 @@ if [ -f "${PLUGIN_DIR}/config.py.bak" ]; then
 fi
 
 # Update Klipper extensions if they exist
-#if [ -d "${REPO_DIR}/klipper/extras" ]; then
-#    echo "Updating Klipper extensions..."
-    # Backup existing files if they haven't been backed up
-    #if [ -f "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py" ] && [ ! -f "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py.bak" ]; then
-    #    cp "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py" "${KLIPPER_DIR}/klippy/extras/virtual_sdcard.py.bak"
-    #fi
-    
-#    if [ -f "${KLIPPER_DIR}/klippy/extras/print_stats.py" ] && [ ! -f "${KLIPPER_DIR}/klippy/extras/print_stats.py.bak" ]; then
- #       cp "${KLIPPER_DIR}/klippy/extras/print_stats.py" "${KLIPPER_DIR}/klippy/extras/print_stats.py.bak"
-  #  fi
-    
-    # Copy new files
-   # cp "${REPO_DIR}/klipper/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
-#fi
+if [ -d "${REPO_DIR}/kalico_mods/extras" ]; then
+    echo "Updating Klipper extensions..."
+    cp "${REPO_DIR}/kalico_mods/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
+fi
 
 echo "Update complete!"
 echo "Please restart Moonraker and Klipper to apply changes:"
