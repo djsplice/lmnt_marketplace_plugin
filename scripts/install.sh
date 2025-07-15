@@ -47,9 +47,11 @@ cp -r "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace/"* "${PLUGIN_
 
 # Create symlinks
 echo "Creating symlinks in Moonraker components directory..."
+ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
 ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace_plugin.py" "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
 ln -sf "${PLUGIN_DIR}/component/encrypted_print.py" "${COMPONENT_DIR}/encrypted_print.py"
 ln -sf "${PLUGIN_DIR}/component/encrypted_provider.py" "${COMPONENT_DIR}/encrypted_provider.py"
+
 
 # Copy Klipper macros if they exist
 if [ -d "${REPO_DIR}/kalico_mods/extras" ]; then

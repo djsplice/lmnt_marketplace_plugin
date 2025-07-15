@@ -150,15 +150,15 @@
 
 **Tasks**:
 - [ ] Design the web service architecture:
-  - [ ] Define API endpoints for integration with Moonraker
-  - [ ] Plan secure storage for JWT and credentials
+  - [x] Define API endpoints for integration with Moonraker
+  - [x] Plan secure storage for JWT and credentials
   - [ ] Design UI components and user flows
   - [ ] Determine integration points with Mainsail/Fluidd
 - [ ] Implement core authentication functionality:
   - [ ] Create login interface using email/password authentication
   - [ ] Develop secure session management
-  - [ ] Implement printer registration workflow
-  - [ ] Add JWT storage and management
+  - [x] Implement printer registration workflow
+  - [x] Add JWT storage and management
 - [ ] Develop printer management features:
   - [ ] Display printer registration status
   - [ ] Show marketplace connection status
@@ -179,7 +179,7 @@
   - [ ] Add proper error handling and validation
   - [ ] Create secure storage mechanisms
   - [ ] Develop audit logging for security events
-- [ ] Testing and documentation:
+- [] Testing and documentation:
   - [ ] Create user documentation
   - [ ] Develop installation guide
   - [ ] Write developer documentation
