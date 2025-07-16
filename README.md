@@ -73,6 +73,21 @@ This plugin uses a robust public-key cryptography system to ensure that only you
 - **LMNT Marketplace integration with secure printer token management**
 - **Printer-specific encryption key (PSEK) handling for secure G-code decryption**
 
+## Slicer Requirements
+
+For optimal layer progress tracking in Mainsail/Fluidd during encrypted prints, your slicer profiles should include the following G-code commands:
+
+### OrcaSlicer Configuration
+
+Add these commands to your machine profile:
+
+- **Start G-code**: Include `SET_PRINT_STATS_INFO TOTAL_LAYER=[total_layer_count]`
+- **Layer Change G-code**: Include `SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}`
+
+These commands enable Klipper's native print stats system to properly track and display layer progress ("Layer X of Y") in your printer's web interface.
+
+**Note**: The variable syntax uses square brackets `[total_layer_count]` for start G-code and curly braces `{layer_num + 1}` for layer change G-code.
+
 ## Configuration
 
 The plugin can be configured in the `moonraker.conf` file. Here's an example configuration:

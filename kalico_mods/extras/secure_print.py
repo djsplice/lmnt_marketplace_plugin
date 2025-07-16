@@ -156,8 +156,9 @@ class SecurePrint:
             file_size = file_handle.tell()
             file_handle.seek(0)
 
-            # Get metadata from encrypted_file_bridge
-            metadata = getattr(self.encrypted_file_bridge, 'metadata', {})
+            # Get metadata from encrypted_file_bridge for this specific file
+            metadata = self.encrypted_file_bridge.get_file_metadata(filename) if self.encrypted_file_bridge else {}
+            logging.info(f"[SecurePrint] Retrieved metadata for {filename}: {metadata}")
 
             # Create provider for in-memory file
             provider = SecurePrintGCodeProvider(file_handle, filename, file_size, metadata)
