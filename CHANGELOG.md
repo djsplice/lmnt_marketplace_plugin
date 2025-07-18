@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0] - 2025-07-16
+
+### Fixed
+- **Layer Progress Tracking**: Resolved critical issue where layer progress was not updating in Mainsail/Fluidd during encrypted prints. Root cause was missing `SET_PRINT_STATS_INFO` commands in OrcaSlicer machine profiles.
+- **Native Klipper Integration**: Ensured encrypted prints now use Klipper's native print stats system instead of custom notifications, providing seamless UI integration.
+- **Slicer Profile Updates**: Updated OrcaSlicer machine profiles to include proper `SET_PRINT_STATS_INFO TOTAL_LAYER=[total_layer_count]` in start GCode and `SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}` in layer change GCode.
+- **Just-in-Time Key Loading**: Fixed critical issue where encrypted prints would fail immediately after marketplace registration if Moonraker hadn't been restarted. Added automatic private key loading via AuthManager when needed, eliminating the need for manual plugin restarts.
+
+### Improved
+- **Print Status Monitoring**: Enhanced print status monitoring and reporting workflow documentation to reflect current native Klipper/Moonraker integration approach.
+- **Code Cleanup**: Removed temporary layer progress injection workaround from encrypted print streaming, simplifying the codebase and relying on proper slicer profile configuration.
+- **Debug Logging**: Cleaned up verbose debug logging that was used during troubleshooting, resulting in cleaner log output while maintaining essential monitoring information.
+
+### Technical Details
+- **Variable Syntax**: Confirmed proper OrcaSlicer variable syntax using `[total_layer_count]` (square brackets) for start GCode and `{layer_num + 1}` (curly braces) for layer change GCode.
+- **Universal Benefit**: These slicer profile improvements benefit ALL prints (encrypted and normal), not just encrypted ones.
+- **Production Ready**: Layer progress tracking system is now production-ready with native Klipper integration and clean logging.
+
 ## [1.1.0] - 2025-06-25
 Git tag v0.2
 

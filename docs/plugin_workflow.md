@@ -65,15 +65,47 @@ Once the plugin receives the job details, it uses a secure, two-step process to 
 
 ## 5. Print Status Monitoring and Reporting
 
-With Klipper handling the print natively, the plugin's role shifts to monitoring for completion.
+With Klipper handling the print natively, the plugin integrates seamlessly with Moonraker's print tracking system and monitors for completion.
 
-1.  **Monitor Klipper State**: The plugin starts a monitoring task (`_monitor_print_progress`) that periodically queries Klipper's `print_stats` object via Moonraker's `klippy_apis`.
-2.  **Detect Job Completion**: It robustly determines the job's end by watching the `print_stats.state` field. A transition from `"printing"` to a terminal state (`"standby"`, `"complete"`, or `"error"`) signals that the print has finished. This method is resilient to Klipper restarts.
-3.  **Report Final Status**: Once a terminal state is detected, the plugin reports the final outcome to the marketplace.
+### Native Print Stats Integration
+
+1.  **Moonraker Integration**: The plugin registers encrypted prints with Moonraker's core components:
+    *   **File Manager**: Registers the print job with a virtual file path (`gcodes/{filename}`) for proper tracking
+    *   **Print Stats**: Notifies Moonraker's `print_stats` component of print start and metadata
+    *   **Virtual SD Card**: Sets the current file in Klipper's `virtual_sdcard` for native print controls
+
+2.  **Layer Progress Tracking**: Proper layer progress is achieved through:
+    *   **Total Layer Count**: Extracted from GCode metadata and set via `SET_PRINT_STATS_INFO TOTAL_LAYER={count}`
+    *   **Current Layer Updates**: OrcaSlicer profiles include `SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}` commands
+    *   **UI Integration**: Mainsail/Fluidd display "Layer X of Y" progress naturally through Klipper's print stats
+
+3.  **Print Controls**: Standard print controls (pause, resume, cancel) work seamlessly:
+    *   Moonraker's file manager enables UI controls
+    *   Klipper handles print state transitions natively
+    *   No custom notifications interfere with the standard workflow
+
+### Job Monitoring and Completion Detection
+
+4.  **Monitor Print Progress**: The plugin starts a background monitoring task (`_monitor_print_progress`) that:
+    *   Periodically queries Klipper's `print_stats` object via Moonraker's `klippy_apis`
+    *   Tracks print state transitions without interfering with native tracking
+    *   Monitors for job completion while preserving standard UI behavior
+
+5.  **Detect Job Completion**: Completion is detected by watching the `print_stats.state` field:
+    *   **Terminal States**: `"standby"`, `"complete"`, or `"error"` indicate print completion
+    *   **State Transitions**: Monitors transition from `"printing"` to terminal states
+    *   **Resilient Detection**: Method works across Klipper restarts and connection issues
+
+6.  **Report Final Status**: Once completion is detected, the plugin reports to the marketplace:
     *   **Endpoint**: `POST /api/report-print-status`
-    *   **Authentication**: The request includes the printer's long-lived JWT.
-    *   **Request Body**: A JSON payload with the `print_job_id` and the final `status` (`"success"` or `"failure"`).
-4.  **Marketplace Actions**: The marketplace API processes the report, updates the purchase record, and logs the event.
+    *   **Authentication**: Request includes the printer's long-lived JWT
+    *   **Payload**: JSON with `print_job_id` and final `status` (`"success"` or `"failure"`)
+    *   **Cleanup**: Monitoring task terminates and resources are cleaned up
+
+7.  **Marketplace Actions**: The marketplace API processes the report:
+    *   Updates the purchase record with final print outcome
+    *   Logs the completion event for analytics and billing
+    *   Enables any post-print workflows (notifications, ratings, etc.)
 
 ## Workflow Diagram
 

@@ -37,35 +37,12 @@ class CryptoManager:
         """Initialize the Crypto Manager"""
         self.integration = integration
         self.dlt_private_key_ed25519 = None
+        self.is_dlt_private_key_loaded = False
     
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
         self.klippy_apis = klippy_apis
         self.http_client = http_client
-        
-        # Load DLT private key if available
-        self._load_dlt_private_key() # Load DLT private key if available
-    
-    def _load_dlt_private_key(self):
-        """Load DLT private key (Ed25519 signing key) from secure storage."""
-        key_file = os.path.join(self.integration.keys_path, "dlt_keypair.json")
-        if os.path.exists(key_file):
-            try:
-                with open(key_file, 'r') as f:
-                    data = json.load(f)
-                    private_key_b64 = data.get('private_key_b64')
-                    if private_key_b64:
-                        private_key_bytes = base64.b64decode(private_key_b64)
-                        # This key is passed in from integration.py now, so we just load it here as a fallback
-                        if not self.dlt_private_key_ed25519:
-                            self.dlt_private_key_ed25519 = Ed25519SigningKey(private_key_bytes)
-                            logging.info("Loaded DLT private key (Ed25519) from storage.")
-                        return True
-            except (json.JSONDecodeError, IOError, binascii.Error) as e:
-                logging.error(f"Error loading DLT private key: {str(e)}")
-        
-        logging.info("No DLT private key found or error loading it.")
-        return False
     
     async def decrypt_dek(self, encrypted_gcode_dek_package):
         """
@@ -229,41 +206,43 @@ class CryptoManager:
             return None
         
         try:
-            iv_bytes = bytes.fromhex(iv)
             dek_bytes = dek
-            
+            iv_bytes = bytes.fromhex(iv)
+
             # Create a memfd file for in-memory storage
             memfd = os.memfd_create(f"gcode_{job_id or 'temp'}", 0)
             logging.info(f"Created memfd for in-memory decryption{job_info}")
-            
+
             cipher = Cipher(algorithms.AES(dek_bytes), modes.CBC(iv_bytes), backend=default_backend())
             decryptor = cipher.decryptor()
-            
+
             # Decrypt in chunks and write to memfd
             chunk_size = 8192  # 8KB chunks
             unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
-            
-            for i in range(0, len(encrypted_data), chunk_size):
+
+            # Process all but the last block
+            decrypted_data = b''
+            for i in range(0, len(encrypted_data) - chunk_size, chunk_size):
                 chunk = encrypted_data[i:i + chunk_size]
-                decrypted_padded_chunk = decryptor.update(chunk)
-                decrypted_chunk = unpadder.update(decrypted_padded_chunk)
-                if decrypted_chunk:
-                    os.write(memfd, decrypted_chunk)
-            
-            # Finalize decryption and unpadding
-            final_padded = decryptor.finalize()
-            final_decrypted = unpadder.update(final_padded) + unpadder.finalize()
-            if final_decrypted:
-                os.write(memfd, final_decrypted)
-            
+                decrypted_data += decryptor.update(chunk)
+
+            # Process the last chunk and finalize
+            last_chunk = encrypted_data[-(len(encrypted_data) % chunk_size) if (len(encrypted_data) % chunk_size) != 0 else chunk_size:]
+            decrypted_data += decryptor.update(last_chunk)
+            decrypted_data += decryptor.finalize()
+
+            # Unpad the entire decrypted result
+            unpadded_data = unpadder.update(decrypted_data) + unpadder.finalize()
+            os.write(memfd, unpadded_data)
+
             logging.info(f"Successfully decrypted G-code content to memfd{job_info}")
-            
+
             # Seek to the beginning of memfd for reading
             os.lseek(memfd, 0, os.SEEK_SET)
             return memfd
-        
-        except (binascii.Error, ValueError, IOError) as e:
-            logging.error(f"Failed to decrypt G-code content to memory{job_info}: {e}")
+
+        except (binascii.Error, ValueError, IOError, TypeError) as e:
+            logging.exception(f"Failed to decrypt G-code content to memory{job_info}: {e}")
             if 'memfd' in locals():
                 os.close(memfd)
             return None
