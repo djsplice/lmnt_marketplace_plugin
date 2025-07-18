@@ -12,6 +12,7 @@ from typing import Optional
 from moonraker.common import UserInfo
 from moonraker.utils.exceptions import ServerError
 import traceback
+from .lmnt_marketplace.print_service import PrintJob, PrintResult
 
 # Ensure the current directory is in the Python path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,7 @@ class EncryptedPrint:
         self.moonraker_pid = os.getpid()
         self.active_memfds = {}
         self.crypto_manager = None
+        self.print_service = None
 
         # Component lookups are deferred to _handle_klippy_ready to avoid load order issues
         self.server.register_event_handler(
@@ -66,6 +68,7 @@ class EncryptedPrint:
             lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
             self.lmnt_integration = lmnt_component.integration
             self.crypto_manager = self.lmnt_integration.crypto_manager
+            self.print_service = self.lmnt_integration.print_service
             logging.info("[EncryptedPrint] All components successfully initialized.")
         except Exception as e:
             logging.exception(
@@ -74,19 +77,14 @@ class EncryptedPrint:
         return False  # Return False to unregister this handler after it runs
 
     async def handle_encrypted_print(self, web_request):
-
         try:
             # Just-in-time component lookup to prevent race conditions
-            if self.lmnt_integration is None:
-                lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
-                self.lmnt_integration = lmnt_component.integration
-                self.crypto_manager = self.lmnt_integration.crypto_manager
-            if self.file_manager is None:
-                self.file_manager = self.server.lookup_component("file_manager")
-            if self.klippy_apis is None:
-                self.klippy_apis = self.server.lookup_component("klippy_apis")
-            if self.database is None:
-                self.database = self.server.lookup_component("database")
+            if self.print_service is None:
+                if self.lmnt_integration is None:
+                    lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
+                    self.lmnt_integration = lmnt_component.integration
+                self.print_service = self.lmnt_integration.print_service
+            
             # Use the correct WebRequest API method to get all arguments
             data = web_request.get_args()
             
@@ -95,116 +93,33 @@ class EncryptedPrint:
             gcode_dek_package = data.get("gcode_dek_package")
             gcode_iv_hex = data.get("gcode_iv_hex")
             filename = data.get("filename", f"encrypted_{job_id}.gcode")
+            
             if not all([job_id, encrypted_gcode, gcode_dek_package, gcode_iv_hex]):
                 raise ServerError("Missing required parameters", 400)
             
-            logging.info(f"[EncryptedPrint] Received encrypted print job {job_id}, decrypting in memory")
+            logging.info(f"[EncryptedPrint] Received encrypted print job {job_id}, delegating to print service")
             
-            # Ensure the crypto manager is available
-            if not self.crypto_manager:
-                raise ServerError("Crypto manager not available", 503)
-
-            # Just-in-time key loading
-            if not self.crypto_manager.is_dlt_private_key_loaded:
-                logging.info("[EncryptedPrint] Private key not loaded. Attempting to load now via AuthManager...")
-                # Ask the AuthManager to re-load the key. It will update the CryptoManager.
-                if not self.lmnt_integration.auth_manager._load_dlt_private_key():
-                    logging.error(f"[EncryptedPrint] Error processing job {job_id}: AuthManager failed to load private key on-demand.")
-                    raise ServerError("Failed to load private key on-demand via AuthManager.", 500)
-                else:
-                    logging.info("[EncryptedPrint] AuthManager successfully loaded the private key.")
-
-            # First, decrypt the Data Encryption Key (DEK)
-            decrypted_dek = await self.crypto_manager.decrypt_dek(gcode_dek_package)
-            if decrypted_dek is None:
-                raise ServerError(f"Failed to decrypt DEK for job {job_id}", 500)
-
-            # Now, decrypt the GCode using the decrypted DEK
-            decrypted_memfd = await self.crypto_manager.decrypt_gcode_bytes_to_memory(
-                encrypted_gcode, decrypted_dek, gcode_iv_hex, job_id
+            # Create PrintJob and delegate to unified print service
+            print_job = PrintJob(
+                job_id=job_id,
+                encrypted_data=encrypted_gcode,
+                dek_package=gcode_dek_package,
+                iv_hex=gcode_iv_hex,
+                filename=filename,
+                metadata=data.get('metadata', {})
             )
-            if decrypted_memfd is None:
-                raise ServerError(f"Failed to decrypt GCode for job {job_id}", 400)
             
-            logging.info(f"[EncryptedPrint] Received decrypted memfd {decrypted_memfd} for job {job_id}")
+            result = await self.print_service.start_encrypted_print(print_job)
             
-            # Extract metadata from request data
-            metadata = data.get('metadata', {})
-            
-            # Update metadata with any additional parsed data if needed
-            await self._parse_metadata_from_memfd(decrypted_memfd, metadata)
-
-            # CRITICAL: Rewind the file descriptor after parsing metadata.
-            # The parser leaves the file pointer at the end of its read.
-            os.lseek(decrypted_memfd, 0, os.SEEK_SET)
-            
-            # Extract layer count from decrypted GCode for proper progress tracking
-            layer_count = await self._extract_layer_count_from_memfd(decrypted_memfd)
-            
-            # Add layer count to metadata for Mainsail UI
-            if layer_count > 0:
-                metadata['layer_count'] = layer_count
-                metadata['object_height'] = metadata.get('object_height', 0)  # Ensure object_height exists
-                logging.info(f"[EncryptedPrint] Added layer_count={layer_count} to metadata")
-            
-            # Rewind again after layer extraction
-            os.lseek(decrypted_memfd, 0, os.SEEK_SET)
-
-            # 1. Register the file descriptor with Klipper's bridge
-            filename = f"virtual_{job_id}_{int(time.time())}.gcode"
-            memfd_fileno = decrypted_memfd
-
-            # Track the memfd so we can close it on job completion
-            self.active_memfds[filename] = memfd_fileno
-            
-            # Build REGISTER_ENCRYPTED_FILE command with metadata
-            register_gcode = f'REGISTER_ENCRYPTED_FILE FILENAME="{filename}" PID={self.moonraker_pid} FD={memfd_fileno}'
-            if layer_count > 0:
-                register_gcode += f' LAYER_COUNT={layer_count}'
-            
-            try:
-                await self.klippy_apis.run_gcode(register_gcode)
-                logging.info(f"[EncryptedPrint] Successfully sent REGISTER_ENCRYPTED_FILE for {filename} with {layer_count} layers")
-            except Exception as e:
-                logging.error(f"[EncryptedPrint] Error registering encrypted file with Klipper: {e}")
-                # Important: Close the memfd if registration fails to prevent leaks
-                os.close(memfd_fileno)
-                raise ServerError(f"Failed to register encrypted file with Klipper: {e}")
-            
-            # 2. Save metadata. This must be done first, unconditionally, to prime the
-            # cache and prevent a race condition where the UI requests metadata
-            # before it has been saved.
-            if self.file_manager:
-                gcode_metadata = self.file_manager.get_metadata_storage()
-                gcode_metadata.insert(filename, metadata)
-                logging.info(f"[EncryptedPrint] Successfully saved metadata for {filename}")
-
-                # 3. Announce the virtual file's existence to the UI.
-                # Now that the metadata is saved, the UI can safely query it.
-                self.file_manager._sched_changed_event("create", "gcodes", filename, immediate=True)
-                logging.info(f"[EncryptedPrint] Notified file manager of new virtual file: {filename}")
-
-            # 4. Set layer count in Klipper if available
-            if layer_count > 0:
-                try:
-                    await self.klippy_apis.run_gcode(f"SET_PRINT_STATS_INFO TOTAL_LAYER={layer_count}")
-                    logging.info(f"[EncryptedPrint] Set TOTAL_LAYER={layer_count} in Klipper for {filename}")
-                except Exception as e:
-                    logging.warning(f"[EncryptedPrint] Failed to set layer count: {e}")
-            
-            # 5. Start the print using the registered file (modern SDCARD_PRINT_FILE approach)
-            print_gcode = f'SDCARD_PRINT_FILE FILENAME={filename}'
-            try:
-                await self.klippy_apis.run_gcode(print_gcode)
-                logging.info(f"[EncryptedPrint] Successfully sent SDCARD_PRINT_FILE for {filename} with {layer_count} layers")
-            except Exception as e:
-                logging.error(f"[EncryptedPrint] Error starting print for encrypted file: {e}")
-                raise ServerError(f"Failed to start print for encrypted file: {e}")
-
-            # NOTE: We intentionally do not close `decrypted_memfd` here.
-            # Its ownership has been passed to the Klipper process, which will manage its lifecycle.
-
-            return {"status": "ok", "message": f"Encrypted print for job {job_id} started via SDCARD_PRINT_FILE"}
+            if result.success:
+                return {
+                    "status": "ok", 
+                    "message": f"Encrypted print for job {job_id} started successfully",
+                    "metadata": result.metadata,
+                    "layer_count": result.layer_count
+                }
+            else:
+                raise ServerError(f"Failed to start encrypted print: {result.error_message}", 500)
         except Exception as e:
             job_id = data.get("job_id", "unknown") if 'data' in locals() and data else "unknown"
             logging.error(f"[EncryptedPrint] Error processing job {job_id}: {str(e)}")
