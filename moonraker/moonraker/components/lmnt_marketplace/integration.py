@@ -17,6 +17,7 @@ from . import auth
 from . import crypto
 from . import gcode
 from . import jobs
+from .print_service import UnifiedPrintService
 
 class LmntMarketplaceIntegration:
     """
@@ -88,6 +89,7 @@ class LmntMarketplaceIntegration:
         self.crypto_manager = crypto.CryptoManager(self)
         self.gcode_manager = gcode.GCodeManager(self)
         self.job_manager = jobs.JobManager(self)
+        self.print_service = UnifiedPrintService(self)
         
         # Link managers to each other
         # Pass the DLT private key from AuthManager to CryptoManager, if it was loaded
@@ -100,6 +102,7 @@ class LmntMarketplaceIntegration:
         self.job_manager.set_auth_manager(self.auth_manager)
         self.job_manager.set_crypto_manager(self.crypto_manager)
         self.job_manager.set_gcode_manager(self.gcode_manager)
+        self.job_manager.set_print_service(self.print_service)
         
         logging.info("LMNT Marketplace Integration initialized")
     
@@ -121,6 +124,7 @@ class LmntMarketplaceIntegration:
         await self.crypto_manager.initialize(klippy_apis, self.http_client)
         await self.gcode_manager.initialize(klippy_apis, self.http_client)
         await self.job_manager.initialize(klippy_apis, self.http_client)
+        await self.print_service.initialize(klippy_apis, self.server.lookup_component('file_manager'))
         
         logging.info("LMNT Marketplace Integration initialized with Klippy APIs")
     
