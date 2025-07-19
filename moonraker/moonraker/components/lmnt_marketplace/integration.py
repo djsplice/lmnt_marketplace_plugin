@@ -102,7 +102,7 @@ class LmntMarketplaceIntegration:
         self.job_manager.set_auth_manager(self.auth_manager)
         self.job_manager.set_crypto_manager(self.crypto_manager)
         self.job_manager.set_gcode_manager(self.gcode_manager)
-        self.job_manager.set_print_service(self.print_service)
+        # Print service is now accessed via HTTP endpoint instead of direct reference
         
         logging.info("LMNT Marketplace Integration initialized")
     

@@ -16,7 +16,6 @@ import aiohttp
 import base64
 from datetime import datetime
 from tornado.websocket import websocket_connect
-from .print_service import PrintJob, PrintResult
 
 # Using Tornado's native WebSocket client for async compatibility
 
@@ -52,10 +51,6 @@ class JobManager:
     def set_gcode_manager(self, gcode_manager):
         """Set the gcode manager reference"""
         self.gcode_manager = gcode_manager
-        
-    def set_print_service(self, print_service):
-        """Set the print service reference"""
-        self.print_service = print_service
     
     async def initialize(self, klippy_apis, http_client):
         """Initialize with Klippy APIs and HTTP client"""
@@ -373,10 +368,10 @@ class JobManager:
             await self._update_job_status(job_id, "failed", "Failed to download GCode")
             self.current_print_job = None
             return
-        logging.info(f"LMNT PROCESS: Sending encrypted GCode for job {job_id} to unified print service")
+        logging.info(f"LMNT PROCESS: Sending encrypted GCode for job {job_id} to /server/encrypted/print endpoint")
         mem_fd = os.open(encrypted_gcode_path, os.O_RDONLY)
         success = await self._start_print(job, mem_fd)
-        # Note: Don't close mem_fd here - it's now managed by the print service
+        os.close(mem_fd)
         if not success:
             logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
             await self._update_job_status(job_id, "failed", "Failed to start print")
@@ -632,30 +627,50 @@ class JobManager:
             encrypted_gcode = memfd_file.read()
             memfd_file.close()
 
-            # Create PrintJob and use unified print service
-            logging.info(f"LMNT PRINT: Starting job {job_id} using unified print service")
-            print_job = PrintJob(
-                job_id=job_id,
-                encrypted_data=encrypted_gcode,
-                dek_package=job.get("gcode_dek_package"),
-                iv_hex=job.get("gcode_iv_hex"),
-                filename=f"job_{job_id}_{int(time.time())}.gcode",
-                metadata=job.get("metadata", {})
-            )
-            
-            result = await self.print_service.start_encrypted_print(print_job)
-            
-            if result.success:
-                logging.info(f"LMNT PRINT: Successfully started job {job_id}, beginning progress monitoring.")
-                # Start monitoring for marketplace status reporting
-                asyncio.create_task(self._monitor_print_progress(job_id))
-                return True
-            else:
-                logging.error(f"LMNT PRINT: Failed to start job {job_id}: {result.error_message}")
-                await self._update_job_status(job_id, "failed", result.error_message)
-                self.current_print_job = None
-                self.print_job_started = False
-                return False
+            # Send to encrypted_print endpoint
+            logging.info(f"LMNT PRINT: Sending job {job_id} to encrypted_print endpoint")
+            url = "http://localhost:7125/server/encrypted/print"
+            data = {
+                "job_id": job_id,
+                "encrypted_gcode": base64.b64encode(encrypted_gcode).decode("utf-8"),
+                "gcode_dek_package": job.get("gcode_dek_package"),
+                "gcode_iv_hex": job.get("gcode_iv_hex"),
+                "filename": f"virtual_{job_id}_{int(time.time())}.gcode"
+            }
+            async with self.http_client.post(url, json=data) as response:
+                response_text = await response.text()
+                logging.info(f"LMNT PRINT: Encrypted print endpoint response - Status: {response.status}, Body: {response_text}")
+                
+                if response.status == 200:
+                    try:
+                        response_data = json.loads(response_text)
+                        # Handle nested result structure: {"result": {"status": "ok", ...}}
+                        result = response_data.get('result', response_data)
+                        if result.get('status') == 'ok':
+                            logging.info(f"LMNT PRINT: Successfully started job {job_id}, beginning progress monitoring.")
+                            # Start monitoring for marketplace status reporting
+                            asyncio.create_task(self._monitor_print_progress(job_id))
+                        else:
+                            logging.error(f"LMNT PRINT: Encrypted print endpoint returned error: {response_data}")
+                            await self._update_job_status(job_id, "failed", f"Print start error: {response_data}")
+                            self.current_print_job = None
+                            self.print_job_started = False
+                            return False
+                    except json.JSONDecodeError as e:
+                        logging.error(f"LMNT PRINT: Failed to parse response JSON: {e}")
+                        await self._update_job_status(job_id, "failed", f"Invalid response format: {response_text}")
+                        self.current_print_job = None
+                        self.print_job_started = False
+                        return False
+                else:
+                    logging.error(f"LMNT PRINT: Failed to start job {job_id} - Status: {response.status}, Response: {response_text}")
+                    await self._update_job_status(job_id, "failed", f"HTTP {response.status}: {response_text}")
+                    self.current_print_job = None
+                    self.print_job_started = False
+                    return False
+
+            logging.info(f"LMNT PRINT: Successfully initiated print job {job_id}")
+            return True
 
         except Exception as e:
             logging.error(f"LMNT PRINT: Error starting print for job {job.get('id', 'unknown')}: {str(e)}")
@@ -796,7 +811,7 @@ class JobManager:
             elif status in ['failed', 'cancelled']:
                 api_status = 'failure'
             elif status == 'printing': # Printing is a form of processing
-                api_status = 'processing'
+                api_status = 'printing'
             # 'processing' maps to 'processing'
             
             payload = {"status": api_status}
@@ -943,7 +958,7 @@ class JobManager:
             self.current_print_job = job
             
             # Update job status to processing
-            await self._update_job_status(job_id, 'processing', 'Starting job')
+            await self._update_job_status(job_id, 'printing', 'Starting job')
             
             # Download and decrypt GCode
             encrypted_filepath = await self._download_gcode(job)
@@ -957,7 +972,7 @@ class JobManager:
             asyncio.create_task(self._start_print(job, encrypted_filepath))
             
             return {
-                "status": "processing",
+                "status": "printing",
                 "job_id": job_id,
                 "message": "Job started successfully"
             }
