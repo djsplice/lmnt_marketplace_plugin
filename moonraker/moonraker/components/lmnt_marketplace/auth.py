@@ -38,8 +38,10 @@ class AuthManager:
         self.integration = integration
         self.printer_token = None
         self.token_expiry = None
+        self.token_created_at = None
         self.user_token = None  # Temporary storage for user JWT during registration
         self.printer_id = None
+        self.printer_name = None  # Store printer name for re-registration
         self.printer_kek_id = None # Added to store printer_kek_id
         self.dlt_private_key = None # For DLT-native printer key pair
         self.klippy_apis = None
@@ -126,9 +128,14 @@ class AuthManager:
     
     def load_printer_token(self):
         """Load saved printer token and kek_id from secure storage"""
-        logging.info("LMNT AUTH: Loading printer token from storage")
+        logging.info("LMNT AUTH: Starting token load process...")
         token_file = os.path.join(self.integration.tokens_path, "printer_token.json")
         logging.info(f"LMNT AUTH: Looking for token file at {token_file}")
+        logging.info(f"LMNT AUTH: Token file exists: {os.path.exists(token_file)}")
+        
+        if not os.path.exists(token_file):
+            logging.info(f"LMNT AUTH: No token file found at {token_file}")
+            return False
         
         if os.path.exists(token_file):
             try:
@@ -136,16 +143,62 @@ class AuthManager:
                     data = json.load(f)
                     self.printer_token = data.get('token')
                     expiry_str = data.get('expiry')
+                    created_at_str = data.get('created_at')
+                    self.printer_name = data.get('printer_name')
+                    
                     if expiry_str:
                         self.token_expiry = datetime.fromisoformat(expiry_str)
                     
+                    if created_at_str:
+                        self.token_created_at = datetime.fromisoformat(created_at_str)
+                    else:
+                        # If no creation time, assume it was created 1 day before now
+                        self.token_created_at = datetime.now() - timedelta(days=1)
+                        
+                    if self.printer_name:
+                        logging.info(f"LMNT AUTH: Loaded printer name: {self.printer_name}")
+                    else:
+                        logging.info("LMNT AUTH: No printer name found in token file")
+                    
                     if self.printer_token:
+                        logging.info(f"LMNT AUTH: Token loaded, attempting to extract printer ID...")
+                        
+                        # Always extract printer ID first, even if token is expired
+                        # The JobManager needs the printer ID to function
                         self.printer_id = self._get_printer_id_from_token()
+                        
                         if self.printer_id:
-                            logging.info(f"LMNT AUTH: Loaded printer token for printer ID: {self.printer_id}")
-                            return True
+                            logging.info(f"LMNT AUTH: Successfully extracted printer ID: {self.printer_id}")
                         else:
                             logging.error("LMNT AUTH: Token loaded but no printer ID found in token")
+                            # Let's try to decode the token and see what's in it
+                            payload = self._decode_token(self.printer_token)
+                            if payload:
+                                logging.error(f"LMNT AUTH: Token payload keys: {list(payload.keys())}")
+                                if self.integration.debug_mode:
+                                    logging.debug(f"LMNT AUTH: Full token payload: {payload}")
+                            else:
+                                logging.error("LMNT AUTH: Failed to decode token payload")
+                        
+                        # Check if token is already expired
+                        now = self._get_timezone_aware_now()
+                        if self.token_expiry:
+                            comparison = self._safe_datetime_comparison(self.token_expiry, now)
+                            if comparison is not None and comparison <= 0:  # expired or equal
+                                logging.warning(f"LMNT AUTH: Loaded token is expired (expired: {self.token_expiry}, now: {now})")
+                                # Schedule token refresh/re-registration but still return True since we have a printer ID
+                                self.integration.eventloop.delay_callback(
+                                    5, self.check_token_refresh)
+                            elif comparison is not None:
+                                logging.info(f"LMNT AUTH: Token is valid until {self.token_expiry}")
+                            else:
+                                logging.error("LMNT AUTH: Could not compare token expiry times, scheduling refresh")
+                                self.integration.eventloop.delay_callback(
+                                    5, self.check_token_refresh)
+                        
+                        # Return True if we have a printer ID, regardless of token expiry
+                        # The JobManager needs the printer ID to function properly
+                        return bool(self.printer_id)
                     else:
                         logging.error("LMNT AUTH: Token file exists but contains no token")
             except (json.JSONDecodeError, IOError) as e:
@@ -222,15 +275,20 @@ class AuthManager:
         
         token_file = os.path.join(self.integration.tokens_path, "printer_token.json")
         try:
+            # Store token creation time for proactive refresh
+            now = datetime.now()
             with open(token_file, 'w') as f:
                 json.dump({
                     'token': token,
-                    'expiry': expiry.isoformat() if expiry else None
+                    'expiry': expiry.isoformat() if expiry else None,
+                    'created_at': now.isoformat(),
+                    'printer_name': self.printer_name if hasattr(self, 'printer_name') else None
                 }, f)
             
             # Update in-memory token
             self.printer_token = token
             self.token_expiry = expiry
+            self.token_created_at = now
             
             # Extract printer_id from token
             self.printer_id = self._get_printer_id_from_token()
@@ -245,55 +303,442 @@ class AuthManager:
             logging.error(f"Error saving printer token: {str(e)}")
             return False
     
+    def _get_timezone_aware_now(self):
+        """
+        Get current time in the appropriate timezone for comparison
+        
+        Returns:
+            datetime: Current time, timezone-aware if needed
+        """
+        from datetime import timezone
+        return datetime.now(timezone.utc)
+    
+    def _safe_datetime_comparison(self, dt1, dt2):
+        """
+        Safely compare two datetime objects, handling timezone differences
+        
+        Args:
+            dt1: First datetime
+            dt2: Second datetime
+            
+        Returns:
+            int: -1 if dt1 < dt2, 0 if equal, 1 if dt1 > dt2, None if comparison fails
+        """
+        try:
+            # If both have timezone info or both don't, direct comparison
+            if (dt1.tzinfo is None) == (dt2.tzinfo is None):
+                if dt1 < dt2:
+                    return -1
+                elif dt1 > dt2:
+                    return 1
+                else:
+                    return 0
+            
+            # Mixed timezone awareness - convert both to UTC
+            from datetime import timezone
+            
+            if dt1.tzinfo is None:
+                dt1_utc = dt1.replace(tzinfo=timezone.utc)
+            else:
+                dt1_utc = dt1.astimezone(timezone.utc)
+                
+            if dt2.tzinfo is None:
+                dt2_utc = dt2.replace(tzinfo=timezone.utc)
+            else:
+                dt2_utc = dt2.astimezone(timezone.utc)
+                
+            if dt1_utc < dt2_utc:
+                return -1
+            elif dt1_utc > dt2_utc:
+                return 1
+            else:
+                return 0
+                
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Error comparing datetimes: {e}")
+            return None
+    
+    def _decode_token(self, token, verify=False):
+        """
+        Decode a JWT token and return the payload
+        
+        Args:
+            token: JWT token to decode
+            verify: Whether to verify the token signature
+            
+        Returns:
+            dict: Token payload or None if decoding fails
+        """
+        if not token:
+            return None
+            
+        try:
+            # Decode the JWT token with or without verification
+            if verify:
+                # When verifying, we need to specify algorithms and provide a key
+                # This would require the secret key, which we don't have
+                # For now, we'll skip verification since we don't have the key
+                logging.warning("LMNT AUTH: Token verification requested but no key available")
+                return None
+            else:
+                # When not verifying signature, provide a dummy key and disable verification
+                payload = jwt.decode(
+                    token,
+                    key="dummy",  # Dummy key since we're not verifying
+                    options={"verify_signature": False, "verify_exp": False, "verify_aud": False},
+                    algorithms=["HS256", "HS512", "RS256", "RS512", "ES256", "ES512"]
+                )
+            return payload
+        except jwt.ExpiredSignatureError:
+            logging.warning("LMNT AUTH: Token has expired")
+            return None
+        except jwt.InvalidTokenError as e:
+            logging.error(f"LMNT AUTH: Invalid token: {str(e)}")
+            return None
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Error decoding token: {str(e)}")
+            import traceback
+            logging.error(f"LMNT AUTH: {traceback.format_exc()}")
+            return None
+    
+    def _get_token_expiry_from_jwt(self, token):
+        """
+        Extract expiry time directly from JWT token
+        
+        Args:
+            token: JWT token to extract expiry from
+            
+        Returns:
+            datetime: Token expiry time or None if extraction fails
+        """
+        if not token:
+            return None
+            
+        payload = self._decode_token(token)
+        if not payload:
+            return None
+            
+        # Try standard 'exp' claim first
+        exp = payload.get('exp')
+        if exp:
+            try:
+                # JWT exp is in seconds since epoch - convert to UTC timezone-aware datetime
+                from datetime import timezone
+                return datetime.fromtimestamp(exp, tz=timezone.utc)
+            except Exception as e:
+                logging.error(f"LMNT AUTH: Error converting exp to datetime: {str(e)}")
+        
+        # Try custom expiry fields if exp not found
+        expiry_str = payload.get('expiry') or payload.get('token_expires')
+        if expiry_str:
+            try:
+                return datetime.fromisoformat(expiry_str.replace('Z', '+00:00'))
+            except Exception as e:
+                logging.error(f"LMNT AUTH: Error parsing expiry string: {str(e)}")
+                
+        return None
+    
     def _get_printer_id_from_token(self):
         """Extract printer ID from the JWT token"""
         if not self.printer_token:
             logging.error("LMNT AUTH: Cannot extract printer ID - no token available")
             return None
         
-        try:
-            # Decode JWT without verification to extract printer_id
-            # This is safe because we're not using the token for authentication here
-            payload = jwt.decode(self.printer_token, options={"verify_signature": False})
-            
-            # Check for both camelCase and snake_case variations of printer ID
-            printer_id = payload.get('printer_id') or payload.get('printerId')
-            
-            if printer_id:
-                logging.info(f"LMNT AUTH: Successfully extracted printer ID from token: {printer_id}")
-            else:
-                logging.error("LMNT AUTH: Token does not contain a printer_id or printerId claim")
-                logging.error(f"LMNT AUTH: Available claims in token: {list(payload.keys())}")
-                if self.integration.debug_mode:
-                    logging.debug(f"LMNT AUTH: Token payload: {payload}")
-            
-            return printer_id
-        except Exception as e:
-            logging.error(f"LMNT AUTH: Error extracting printer ID from token: {str(e)}")
-            import traceback
-            logging.error(f"LMNT AUTH: {traceback.format_exc()}")
+        logging.info("LMNT AUTH: Attempting to decode token to extract printer ID...")
+        payload = self._decode_token(self.printer_token)
+        if not payload:
+            logging.error("LMNT AUTH: Failed to decode token payload")
             return None
+            
+        logging.info(f"LMNT AUTH: Token decoded successfully, available claims: {list(payload.keys())}")
+        
+        # Check for both camelCase and snake_case variations of printer ID
+        printer_id = payload.get('printer_id') or payload.get('printerId')
+        
+        if printer_id:
+            logging.info(f"LMNT AUTH: Successfully extracted printer ID from token: {printer_id}")
+        else:
+            logging.error("LMNT AUTH: Token does not contain a printer_id or printerId claim")
+            logging.error(f"LMNT AUTH: Available claims in token: {list(payload.keys())}")
+            # Log the actual values to help debug
+            logging.error(f"LMNT AUTH: printer_id value: {payload.get('printer_id')}")
+            logging.error(f"LMNT AUTH: printerId value: {payload.get('printerId')}")
+            if self.integration.debug_mode:
+                logging.debug(f"LMNT AUTH: Full token payload: {payload}")
+        
+        return printer_id
+    
+    def is_token_valid(self, token=None):
+        """
+        Check if a token is valid by decoding it and checking expiry
+        
+        Args:
+            token: JWT token to check, or use self.printer_token if None
+            
+        Returns:
+            bool: True if token is valid, False otherwise
+        """
+        token_to_check = token or self.printer_token
+        if not token_to_check:
+            return False
+            
+        # Try to decode the token - this will return None if expired or invalid
+        payload = self._decode_token(token_to_check)
+        if not payload:
+            return False
+            
+        # Check if token has an expiry and if it's in the future
+        jwt_expiry = self._get_token_expiry_from_jwt(token_to_check)
+        if jwt_expiry:
+            now = datetime.now()
+            if jwt_expiry <= now:
+                logging.warning(f"LMNT AUTH: Token has expired at {jwt_expiry}")
+                return False
+                
+        return True
+        
+    def get_token_status(self, token=None):
+        """
+        Get detailed status information about a token
+        
+        Args:
+            token: JWT token to check, or use self.printer_token if None
+            
+        Returns:
+            dict: Token status information including validity, expiry, time remaining, etc.
+        """
+        token_to_check = token or self.printer_token
+        status = {
+            "valid": False,
+            "exists": bool(token_to_check),
+            "expired": False,
+            "expiry": None,
+            "time_remaining": None,
+            "printer_id": None,
+            "created_at": None,
+            "lifetime_percent": None
+        }
+        
+        if not token_to_check:
+            return status
+            
+        # Try to decode the token
+        payload = self._decode_token(token_to_check)
+        if not payload:
+            status["valid"] = False
+            return status
+            
+        # Token is at least decodable
+        status["valid"] = True
+        
+        # Extract expiry
+        jwt_expiry = self._get_token_expiry_from_jwt(token_to_check)
+        if jwt_expiry:
+            status["expiry"] = jwt_expiry
+            now = datetime.now()
+            time_remaining = jwt_expiry - now
+            status["time_remaining"] = time_remaining
+            status["expired"] = time_remaining <= timedelta(0)
+            
+            # Extract creation time if available
+            if hasattr(self, 'token_created_at') and self.token_created_at:
+                status["created_at"] = self.token_created_at
+                token_lifetime = jwt_expiry - self.token_created_at
+                if token_lifetime.total_seconds() > 0:
+                    elapsed = now - self.token_created_at
+                    status["lifetime_percent"] = (elapsed.total_seconds() / token_lifetime.total_seconds()) * 100
+        
+        # Extract printer ID
+        if payload.get('printer_id') or payload.get('printerId'):
+            status["printer_id"] = payload.get('printer_id') or payload.get('printerId')
+            
+        return status
     
     def check_token_refresh(self):
         """Check if token needs to be refreshed and schedule refresh if needed"""
-        if not self.printer_token or not self.token_expiry:
-            logging.info("No printer token available for refresh check")
+        if not self.printer_token:
+            logging.info("LMNT AUTH: No printer token available for refresh check")
             return
         
-        # Calculate time until expiry
-        now = datetime.now()
-        time_until_expiry = self.token_expiry - now
+        # First, verify the token is valid by decoding it
+        # This catches malformed tokens that might have been corrupted
+        if not self._decode_token(self.printer_token):
+            logging.warning("LMNT AUTH: Token is invalid or malformed, attempting re-registration")
+            asyncio.create_task(self._handle_expired_token())
+            return
         
-        # If token expires in less than 7 days, refresh it
+        # Get expiry directly from JWT if possible
+        jwt_expiry = self._get_token_expiry_from_jwt(self.printer_token)
+        if jwt_expiry:
+            # Use the expiry from JWT if available
+            self.token_expiry = jwt_expiry
+            logging.info(f"LMNT AUTH: Using expiry from JWT: {jwt_expiry}")
+        
+        # Calculate time until expiry using timezone-safe comparison
+        now = self._get_timezone_aware_now()
+        
+        # If we don't have a valid expiry time, try to re-register
+        if not self.token_expiry:
+            logging.warning("LMNT AUTH: No token expiry information available, attempting re-registration")
+            asyncio.create_task(self._handle_expired_token())
+            return
+        
+        # Use safe datetime comparison to check if token is expired
+        comparison = self._safe_datetime_comparison(self.token_expiry, now)
+        if comparison is None:
+            logging.error("LMNT AUTH: Could not compare token expiry, attempting re-registration")
+            asyncio.create_task(self._handle_expired_token())
+            return
+        elif comparison <= 0:  # expired or equal
+            logging.warning(f"LMNT AUTH: Printer token has expired, attempting re-registration")
+            asyncio.create_task(self._handle_expired_token())
+            return
+        
+        # Calculate time until expiry for logging and scheduling
+        try:
+            # Convert both to same timezone for arithmetic
+            from datetime import timezone
+            if self.token_expiry.tzinfo is not None:
+                expiry_utc = self.token_expiry.astimezone(timezone.utc)
+                now_utc = now.astimezone(timezone.utc)
+            else:
+                expiry_utc = self.token_expiry
+                now_utc = now.replace(tzinfo=None)
+            time_until_expiry = expiry_utc - now_utc
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Error calculating time until expiry: {e}")
+            # Default to a safe assumption
+            time_until_expiry = timedelta(days=1)
+        
+        # Calculate token lifetime and time since creation
+        token_lifetime = None
+        time_since_creation = None
+        
+        if hasattr(self, 'token_created_at') and self.token_created_at:
+            token_lifetime = self.token_expiry - self.token_created_at
+            time_since_creation = now - self.token_created_at
+            
+            # Log token age information
+            days_since_creation = time_since_creation.total_seconds() / (24 * 60 * 60)
+            total_lifetime_days = token_lifetime.total_seconds() / (24 * 60 * 60)
+            percent_used = (time_since_creation.total_seconds() / token_lifetime.total_seconds()) * 100 if token_lifetime.total_seconds() > 0 else 0
+            
+            logging.info(f"LMNT AUTH: Token age: {days_since_creation:.1f} days ({percent_used:.1f}% of {total_lifetime_days:.1f} day lifetime)")
+        else:
+            # Default values if we don't have creation time
+            token_lifetime = timedelta(days=30)
+            time_since_creation = timedelta(days=0)
+            logging.info(f"LMNT AUTH: Token creation time unknown, assuming new token")
+        
+        # Determine refresh threshold - 80% of lifetime or 7 days before expiry, whichever comes first
+        refresh_threshold = token_lifetime * 0.8 if token_lifetime else timedelta(days=23)  # 80% of 30 days
+        days_until_expiry = time_until_expiry.total_seconds() / (24 * 60 * 60)
+        
+        # Refresh conditions:
+        # 1. Less than 7 days remain before expiry
+        # 2. Token has been used for more than 80% of its lifetime
+        # 3. Token is older than 23 days (for 30-day tokens)
         if time_until_expiry < timedelta(days=7):
-            logging.info(f"Printer token expires in {time_until_expiry}, scheduling refresh")
+            logging.info(f"LMNT AUTH: Printer token expires in {days_until_expiry:.1f} days, scheduling refresh")
+            asyncio.create_task(self.refresh_printer_token())
+        elif time_since_creation and time_since_creation > refresh_threshold:
+            logging.info(f"LMNT AUTH: Token has reached {percent_used:.1f}% of its lifetime, scheduling refresh")
             asyncio.create_task(self.refresh_printer_token())
         else:
-            # Schedule next check in 24 hours
-            logging.debug(f"Token valid for {time_until_expiry}, next check in 24 hours")
+            # Calculate next check time - check daily if expiring soon, otherwise every 3 days
+            next_check_hours = 24 if time_until_expiry < timedelta(days=10) else 24 * 3
+            
+            logging.info(f"LMNT AUTH: Token valid for {days_until_expiry:.1f} more days, next check in {next_check_hours/24:.1f} days")
             self.integration.eventloop.delay_callback(
-                24 * 60 * 60, self.check_token_refresh)
+                next_check_hours * 60 * 60, self.check_token_refresh)
     
+    async def _handle_expired_token(self):
+        """
+        Handle the case when a token is completely expired
+        
+        This method attempts to re-register the printer if we have the necessary information,
+        or logs a clear message about how to re-register manually.
+        
+        Returns:
+            bool: True if re-registration was successful, False otherwise
+        """
+        logging.warning("LMNT AUTH: Token has expired and needs re-registration")
+        
+        # Backup the expired token for debugging purposes
+        token_file = os.path.join(self.integration.tokens_path, "printer_token.json")
+        expired_token_file = os.path.join(self.integration.tokens_path, "printer_token.json.expired")
+        
+        # Store the current token data before clearing it
+        current_token = self.printer_token
+        current_printer_name = self.printer_name
+        current_printer_id = self.printer_id  # Store printer ID before clearing
+        
+        # Clear token state first to ensure we don't use expired tokens
+        self.printer_token = None
+        self.token_expiry = None
+        self.token_created_at = None
+        self.printer_id = None
+        
+        # Backup the expired token file
+        if os.path.exists(token_file):
+            try:
+                # Create a timestamp for the expired token backup
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_file = f"{expired_token_file}.{timestamp}"
+                
+                # Copy instead of rename to preserve the original for debugging
+                import shutil
+                shutil.copy2(token_file, backup_file)
+                logging.info(f"LMNT AUTH: Backed up expired token to {backup_file}")
+                
+                # Now rename the original to .expired
+                os.rename(token_file, expired_token_file)
+                logging.info("LMNT AUTH: Renamed expired token file to printer_token.json.expired")
+            except Exception as e:
+                logging.error(f"LMNT AUTH: Failed to backup expired token file: {str(e)}")
+        
+        # Check if we have the necessary information for automatic re-registration
+        # Use printer ID from JWT token instead of printer name for more reliable identification
+        if self.user_token and current_printer_id:
+            logging.info(f"LMNT AUTH: Attempting automatic re-registration for printer ID: {current_printer_id}")
+            try:
+                # For automatic re-registration, we need the printer name from the stored value
+                # or we could look it up by printer ID if the API supports it
+                if current_printer_name:
+                    result = await self.register_printer(self.user_token, current_printer_name)
+                    if result and self.printer_token:
+                        logging.info("LMNT AUTH: Automatic re-registration successful")
+                        return True
+                    else:
+                        logging.error("LMNT AUTH: Automatic re-registration failed - no token returned")
+                else:
+                    logging.warning(f"LMNT AUTH: Have printer ID {current_printer_id} but no printer name for re-registration")
+            except Exception as e:
+                logging.error(f"LMNT AUTH: Automatic re-registration failed: {str(e)}")
+                import traceback
+                logging.error(f"LMNT AUTH: {traceback.format_exc()}")
+        else:
+            missing = []
+            if not self.user_token:
+                missing.append("user_token")
+            if not current_printer_id:
+                missing.append("printer_id")
+            if not current_printer_name:
+                missing.append("printer_name")
+            logging.warning(f"LMNT AUTH: Cannot automatically re-register - missing {', '.join(missing)}")
+            if current_printer_id:
+                logging.info(f"LMNT AUTH: Printer ID available: {current_printer_id}")
+            else:
+                logging.warning("LMNT AUTH: No printer ID available from expired token")
+        
+        # If automatic re-registration failed or we don't have the necessary information,
+        # log a clear message about how to re-register manually
+        logging.warning("LMNT AUTH: Manual re-registration required. Please use the Moonraker API endpoint:")
+        logging.warning("LMNT AUTH: POST /printer/lmnt_marketplace/register_printer with user_token and printer_name")
+        logging.warning("LMNT AUTH: Or use the LMNT Marketplace UI to re-register this printer")
+        
+        return False
+        
     async def refresh_printer_token(self):
         """
         Refresh the printer token with the marketplace
@@ -301,10 +746,18 @@ class AuthManager:
         Uses the /api/refresh-printer-token endpoint which is specifically
         designed for printer token refresh. This endpoint validates the current printer token
         and issues a new one with extended expiration.
+        
+        Returns:
+            bool: True if refresh was successful, False otherwise
         """
         if not self.printer_token:
-            logging.error("Cannot refresh printer token: No token available")
+            logging.error("LMNT AUTH: Cannot refresh printer token: No token available")
             return False
+        
+        # First verify that the token is valid (not malformed)
+        if not self._decode_token(self.printer_token):
+            logging.error("LMNT AUTH: Cannot refresh token: Token is invalid or malformed")
+            return await self._handle_expired_token()
         
         refresh_url = f"{self.integration.marketplace_url}/api/refresh-printer-token"
         
@@ -313,48 +766,88 @@ class AuthManager:
             
             # Redact sensitive information in headers
             redacted_headers = self._redact_sensitive_data(headers)
-            logging.info(f"Sending token refresh request with headers: {redacted_headers}")
+            logging.info(f"LMNT AUTH: Sending token refresh request with headers: {redacted_headers}")
+            
+            # Track start time for performance monitoring
+            start_time = datetime.now()
             
             async with self.http_client.post(refresh_url, headers=headers) as response:
+                # Calculate response time for monitoring
+                response_time = (datetime.now() - start_time).total_seconds()
+                logging.info(f"LMNT AUTH: Token refresh API response time: {response_time:.2f} seconds")
+                
                 if response.status == 200:
                     data = await response.json()
                     # Redact sensitive information in response
                     redacted_data = self._redact_sensitive_data(data, is_json=True)
-                    logging.info(f"Token refresh response: {redacted_data}")
+                    logging.info(f"LMNT AUTH: Token refresh response: {redacted_data}")
+                    
                     # Try both field names - some APIs use 'token', others use 'printer_token'
                     new_token = data.get('printer_token') or data.get('token')
                     
                     if new_token:
-                        # Get expiry from response or calculate it
-                        # Try both field names - some APIs use 'token_expires', others use 'expiry'
-                        token_expires = data.get('token_expires') or data.get('expiry')
-                        expiry = None
-                        if token_expires:
-                            try:
-                                expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
-                                logging.info(f"Using expiry date from response: {expiry}")
-                            except ValueError:
-                                # Calculate expiry (30 days from now) if parsing fails
-                                expiry = datetime.now() + timedelta(days=30)
-                                logging.warning(f"Could not parse token expiry: {token_expires}, using default")
+                        # First validate the new token
+                        if not self._decode_token(new_token):
+                            logging.error("LMNT AUTH: Received invalid token from refresh endpoint")
+                            return False
+                        
+                        # Try to get expiry directly from JWT token
+                        jwt_expiry = self._get_token_expiry_from_jwt(new_token)
+                        if jwt_expiry:
+                            expiry = jwt_expiry
+                            logging.info(f"LMNT AUTH: Using expiry from JWT token: {expiry}")
                         else:
-                            # Calculate expiry (30 days from now) if not provided
-                            expiry = datetime.now() + timedelta(days=30)
-                            logging.info("No expiry in response, using default 30 days")
+                            # Fall back to response fields if JWT doesn't have expiry
+                            # Try both field names - some APIs use 'token_expires', others use 'expiry'
+                            token_expires = data.get('token_expires') or data.get('expiry')
+                            expiry = None
+                            if token_expires:
+                                try:
+                                    expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
+                                    logging.info(f"LMNT AUTH: Using expiry date from response: {expiry}")
+                                except ValueError:
+                                    # Calculate expiry (30 days from now) if parsing fails
+                                    expiry = datetime.now() + timedelta(days=30)
+                                    logging.warning(f"LMNT AUTH: Could not parse token expiry: {token_expires}, using default")
+                            else:
+                                # Calculate expiry (30 days from now) if not provided
+                                expiry = datetime.now() + timedelta(days=30)
+                                logging.info("LMNT AUTH: No expiry in response, using default 30 days")
                         
                         # Save the new token
                         self.save_printer_token(new_token, expiry)
-                        logging.info("Printer token refreshed successfully")
+                        logging.info("LMNT AUTH: Printer token refreshed successfully")
                         return True
                     else:
-                        logging.error("Token refresh response missing token or printer_token field")
+                        logging.error("LMNT AUTH: Token refresh response missing token or printer_token field")
+                elif response.status == 401:
+                    # Token is expired or invalid, try re-registration
+                    error_text = await response.text()
+                    logging.warning(f"LMNT AUTH: Token refresh failed with 401 status: {error_text}")
+                    return await self._handle_expired_token()
                 else:
                     error_text = await response.text()
-                    logging.error(f"Token refresh failed with status {response.status}: {error_text}")
+                    logging.error(f"LMNT AUTH: Token refresh failed with status {response.status}: {error_text}")
+                    
+                    # For 5xx errors, retry sooner
+                    if 500 <= response.status < 600:
+                        logging.info("LMNT AUTH: Server error detected, scheduling retry in 15 minutes")
+                        self.integration.eventloop.delay_callback(
+                            15 * 60, self.refresh_printer_token)
+                        return False
+        except aiohttp.ClientError as e:
+            logging.error(f"LMNT AUTH: Network error refreshing printer token: {str(e)}")
+            # Network errors should retry sooner
+            self.integration.eventloop.delay_callback(
+                5 * 60, self.refresh_printer_token)
+            return False
         except Exception as e:
-            logging.error(f"Error refreshing printer token: {str(e)}")
+            logging.error(f"LMNT AUTH: Error refreshing printer token: {str(e)}")
+            import traceback
+            logging.error(f"LMNT AUTH: {traceback.format_exc()}")
         
         # Schedule another attempt in 1 hour if refresh failed
+        logging.info("LMNT AUTH: Scheduling next token refresh attempt in 1 hour")
         self.integration.eventloop.delay_callback(
             60 * 60, self.check_token_refresh)
         return False
@@ -489,6 +982,9 @@ class AuthManager:
             
             # Use standard Authorization header for the marketplace API
             headers = {"Authorization": f"Bearer {self.user_token}"}
+            
+            # Store printer name for potential re-registration later
+            self.printer_name = printer_name
             
             # Build payload with all required fields
             payload = {
