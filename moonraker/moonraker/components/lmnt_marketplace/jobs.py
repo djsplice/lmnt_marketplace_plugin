@@ -17,6 +17,9 @@ import base64
 from datetime import datetime
 from tornado.websocket import websocket_connect
 
+# Import print service data classes
+from .print_service import PrintJob, PrintResult
+
 # Using Tornado's native WebSocket client for async compatibility
 
 class JobManager:
