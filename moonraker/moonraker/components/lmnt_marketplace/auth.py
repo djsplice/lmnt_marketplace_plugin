@@ -45,10 +45,8 @@ class AuthManager:
         self.printer_kek_id = None # Added to store printer_kek_id
         self.dlt_private_key = None # For DLT-native printer key pair
         self.klippy_apis = None
-        
-        # Create HTTP client for API calls
-        self.http_client = aiohttp.ClientSession()
-        logging.info("Created HTTP client for AuthManager")
+        self.http_client = None  # Will be set during initialize()
+        self._owns_http_client = False  # Track if we own the HTTP client
         
         # Load existing printer token if available
         self.load_printer_token()
@@ -87,10 +85,16 @@ class AuthManager:
         """Initialize with Klippy APIs and HTTP client"""
         self.klippy_apis = klippy_apis
         
-        # Use the provided HTTP client if not already created
-        if http_client is not None and not hasattr(self, 'http_client'):
+        # Use the provided HTTP client or create one if not provided
+        if http_client is not None:
             self.http_client = http_client
+            self._owns_http_client = False  # Using shared client
             logging.info("Using provided HTTP client for AuthManager")
+        elif not self.http_client:
+            # Create HTTP client if not provided
+            self.http_client = aiohttp.ClientSession()
+            self._owns_http_client = True  # We own this client
+            logging.info("Created HTTP client for AuthManager")
     
     def register_endpoints(self, register_endpoint):
         """Register HTTP endpoints for authentication"""
@@ -1152,10 +1156,12 @@ class AuthManager:
         
     async def close(self):
         """Close the manager and release resources"""
-        if hasattr(self, 'http_client') and self.http_client is not None:
+        # Only close HTTP client if we created our own (not shared)
+        # The shared client will be closed by the Integration
+        if hasattr(self, '_owns_http_client') and self._owns_http_client and self.http_client is not None:
             await self.http_client.close()
             logging.info("Closed HTTP client for AuthManager")
-            self.http_client = None
+        self.http_client = None
     
     def validate_printer_token(self, token):
         """
