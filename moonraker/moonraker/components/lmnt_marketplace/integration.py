@@ -115,9 +115,26 @@ class LmntMarketplaceIntegration:
         """
         self.klippy_apis = klippy_apis
         
-        # Create HTTP client for API calls
-        self.http_client = aiohttp.ClientSession()
-        logging.info("Created HTTP client for API calls")
+        # Create HTTP client with conservative connection management settings
+        connector = aiohttp.TCPConnector(
+            limit=10,  # Reduced total connection pool size
+            limit_per_host=5,  # Reduced max connections per host
+            enable_cleanup_closed=True,  # Clean up closed connections
+            force_close=True,  # Force close connections after each request
+            use_dns_cache=False  # Disable DNS caching to prevent stale connections
+        )
+        
+        timeout = aiohttp.ClientTimeout(
+            total=30,  # Total timeout for request
+            connect=10,  # Connection timeout
+            sock_read=20  # Socket read timeout
+        )
+        
+        self.http_client = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout
+        )
+        logging.info("Created HTTP client with connection management for API calls")
         
         # Initialize managers with Klippy APIs and HTTP client
         await self.auth_manager.initialize(klippy_apis, self.http_client)

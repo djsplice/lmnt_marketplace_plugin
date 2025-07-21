@@ -173,71 +173,72 @@ class JobManager:
         try:
             # Log the request details
             logging.info(f"LMNT JOB POLLING: Making GET request to {api_url}")
+            logging.debug(f"LMNT JOB POLLING: HTTP client connector info: {self.http_client.connector}")
             
             # Record the start time for timing the request
             start_time = time.time()
             
-            # Make the API request
-            async with aiohttp.ClientSession() as session:
-                async with session.get(api_url, headers=headers) as response:
-                    # Calculate the response time
-                    response_time = int((time.time() - start_time) * 1000)  # Convert to milliseconds
+            # Make the API request using shared HTTP client
+            async with self.http_client.get(api_url, headers=headers) as response:
+                logging.debug(f"LMNT JOB POLLING: Response object created successfully")
+                # Calculate the response time
+                response_time = int((time.time() - start_time) * 1000)  # Convert to milliseconds
+                
+                # Log the response status
+                logging.info(f"LMNT JOB POLLING: Response received in {response_time}ms with status: {response.status}")
+                
+                # Handle different response statuses
+                if response.status == 200:
+                    # Parse the response JSON
+                    data = await response.json()
+                    logging.info(f"LMNT JOB POLLING: Received response: {data}")
                     
-                    # Log the response status
-                    logging.info(f"LMNT JOB POLLING: Response received in {response_time}ms with status: {response.status}")
-                    
-                    # Handle different response statuses
-                    if response.status == 200:
-                        # Parse the response JSON
-                        data = await response.json()
-                        logging.info(f"LMNT JOB POLLING: Received response: {data}")
+                    # Process the jobs data
+                    if 'jobs' in data and data['jobs']:
+                        job_count = len(data['jobs'])
+                        logging.info(f"LMNT JOB POLLING: Found {job_count} pending jobs")
                         
-                        # Process the jobs data
-                        if 'jobs' in data and data['jobs']:
-                            job_count = len(data['jobs'])
-                            logging.info(f"LMNT JOB POLLING: Found {job_count} pending jobs")
-                            
-                            # Process each job
-                            for job in data['jobs']:
-                                print_job_id = job.get('print_job_id')
-                                if print_job_id:
-                                    logging.info(f"LMNT JOB POLLING: Processing job {print_job_id}")
-                                    # Transform the job format to match what _process_pending_jobs expects
-                                    processed_job = {
-                                        'id': print_job_id,
-                                        'purchase_id': job.get('purchase_id'),
-                                        'status': job.get('status'),
-                                        'created_at': job.get('created_at'),
-                                        # New fields for decryption
-                                        'gcode_url': job.get('encrypted_gcode_download_url'), # This is the HTTP(S) URL for the encrypted G-code
-                                        'gcode_dek_package': job.get('gcode_dek_encrypted_hex'), # This field now holds either DLT package or legacy hex
-                                        'gcode_iv_hex': job.get('gcode_iv_hex'),
-                                        'user_account_id': job.get('user_account_id'),
-                                        'printer_kek_id': job.get('printer_kek_id')
-                                    }
-                                    logging.info(f"LMNT JOB POLLING: Job data: {processed_job}")
-                                    if not processed_job.get('gcode_url'):
-                                        logging.error(f"LMNT JOB POLLING: Missing encrypted_gcode_download_url for job {print_job_id}")
-                                        continue
-                                    # Essential fields for decryption are gcode_dek_package and gcode_iv_hex.
-                                    # printer_kek_id is only used for the legacy PSEK path (if crypto_manager chooses that route).
-                                    if not (processed_job.get('gcode_dek_package') and processed_job.get('gcode_iv_hex')):
-                                        logging.error(f"LMNT JOB POLLING: Missing required crypto fields for job {print_job_id}: gcode_dek_package or gcode_iv_hex")
-                                        continue
-                                    # Add job to queue for processing
-                                    await self._process_pending_jobs([processed_job])
-                        else:
-                            logging.info("LMNT JOB POLLING: No pending jobs found")
-                        
-                    elif response.status == 401:
-                        # Token might be expired, try to refresh it
-                        logging.warning("LMNT JOB POLLING: Received 401 Unauthorized, attempting to refresh token")
-                        await self.integration.auth_manager.refresh_printer_token()
-                        
+                        # Process each job
+                        for job in data['jobs']:
+                            print_job_id = job.get('print_job_id')
+                            if print_job_id:
+                                logging.info(f"LMNT JOB POLLING: Processing job {print_job_id}")
+                                # Transform the job format to match what _process_pending_jobs expects
+                                processed_job = {
+                                    'id': print_job_id,
+                                    'purchase_id': job.get('purchase_id'),
+                                    'status': job.get('status'),
+                                    'created_at': job.get('created_at'),
+                                    # New fields for decryption
+                                    'gcode_url': job.get('encrypted_gcode_download_url'), # This is the HTTP(S) URL for the encrypted G-code
+                                    'gcode_dek_package': job.get('gcode_dek_encrypted_hex'), # This field now holds either DLT package or legacy hex
+                                    'gcode_iv_hex': job.get('gcode_iv_hex'),
+                                    'user_account_id': job.get('user_account_id'),
+                                    'printer_kek_id': job.get('printer_kek_id')
+                                }
+                                logging.info(f"LMNT JOB POLLING: Job data: {processed_job}")
+                                if not processed_job.get('gcode_url'):
+                                    logging.error(f"LMNT JOB POLLING: Missing encrypted_gcode_download_url for job {print_job_id}")
+                                    continue
+                                # Essential fields for decryption are gcode_dek_package and gcode_iv_hex.
+                                # printer_kek_id is only used for the legacy PSEK path (if crypto_manager chooses that route).
+                                if not (processed_job.get('gcode_dek_package') and processed_job.get('gcode_iv_hex')):
+                                    logging.error(f"LMNT JOB POLLING: Missing required crypto fields for job {print_job_id}: gcode_dek_package or gcode_iv_hex")
+                                    continue
+                                # Add job to queue for processing
+                                await self._process_pending_jobs([processed_job])
                     else:
-                        # Log other error responses
-                        error_text = await response.text()
-                        logging.error(f"LMNT JOB POLLING: Job polling failed with status {response.status}: {error_text}")
+                        logging.info("LMNT JOB POLLING: No pending jobs found")
+                    
+                elif response.status == 401:
+                    # Token might be expired, try to refresh it
+                    logging.warning("LMNT JOB POLLING: Received 401 Unauthorized, attempting to refresh token")
+                    await self.integration.auth_manager.refresh_printer_token()
+                    
+                else:
+                    # Log other error responses
+                    error_text = await response.text()
+                    logging.error(f"LMNT JOB POLLING: Job polling failed with status {response.status}: {error_text}")
                         
         except aiohttp.ClientConnectorError as e:
             logging.error(f"LMNT JOB POLLING: Connection error while polling for jobs: {str(e)}")
@@ -374,7 +375,7 @@ class JobManager:
         logging.info(f"LMNT PROCESS: Sending encrypted GCode for job {job_id} to /server/encrypted/print endpoint")
         mem_fd = os.open(encrypted_gcode_path, os.O_RDONLY)
         success = await self._start_print(job, mem_fd)
-        os.close(mem_fd)
+        # Note: mem_fd is closed by _start_print() via os.fdopen(), so no need to close it here
         if not success:
             logging.error(f"LMNT PROCESS: Failed to start print for job {job_id}")
             await self._update_job_status(job_id, "failed", "Failed to start print")
