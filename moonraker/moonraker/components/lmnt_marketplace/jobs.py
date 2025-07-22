@@ -364,16 +364,17 @@ class JobManager:
         logging.info(f"LMNT PROCESS: Processing job {job_id}")
         self.current_print_job = job
         await self._update_job_status(job_id, "processing")
-        # Download encrypted GCode
-        logging.info(f"LMNT PROCESS: Downloading encrypted GCode for job {job_id}")
-        encrypted_gcode_path = await self._download_gcode(job)
-        if not encrypted_gcode_path:
-            logging.error(f"LMNT PROCESS: Failed to download GCode for job {job_id}")
-            await self._update_job_status(job_id, "failed", "Failed to download GCode")
+        
+        # Stream encrypted GCode directly to memory (never touches disk)
+        logging.info(f"LMNT PROCESS: Streaming encrypted GCode for job {job_id}")
+        mem_fd = await self._stream_encrypted_gcode_to_memfd(job)
+        if not mem_fd:
+            logging.error(f"LMNT PROCESS: Failed to stream encrypted GCode for job {job_id}")
+            await self._update_job_status(job_id, "failed", "Failed to stream encrypted GCode")
             self.current_print_job = None
             return
-        logging.info(f"LMNT PROCESS: Sending encrypted GCode for job {job_id} to /server/encrypted/print endpoint")
-        mem_fd = os.open(encrypted_gcode_path, os.O_RDONLY)
+        
+        logging.info(f"LMNT PROCESS: Starting print for job {job_id}")
         success = await self._start_print(job, mem_fd)
         # Note: mem_fd is closed by _start_print() via os.fdopen(), so no need to close it here
         if not success:
@@ -383,12 +384,6 @@ class JobManager:
             return
         logging.info(f"LMNT PROCESS: Print started for job {job_id}")
         self.print_job_started = True
-        # Optionally, clean up the encrypted file if it's no longer needed
-        try:
-            os.remove(encrypted_gcode_path)
-            logging.info(f"LMNT PROCESS: Cleaned up encrypted file {encrypted_gcode_path}")
-        except Exception as e:
-            logging.warning(f"LMNT PROCESS: Failed to clean up encrypted file {encrypted_gcode_path}: {str(e)}")
     
     async def _check_printer_ready(self):
         """Check if printer is ready for a new print job"""
@@ -608,7 +603,82 @@ class JobManager:
         
         return None
     
-    async def _start_print(self, job, mem_fd):
+    async def _stream_encrypted_gcode_to_memfd(self, job):
+        """
+        Stream encrypted GCode directly from API to memfd without disk storage
+        
+        Args:
+            job (dict): Job information including ID and URL
+            
+        Returns:
+            int: File descriptor of memfd containing encrypted GCode
+            None: If streaming failed
+        """
+        job_id = job.get('id')
+        gcode_url = job.get('gcode_url')
+        
+        logging.info(f"LMNT STREAM: Starting secure stream for job {job_id}")
+        
+        if not job_id:
+            logging.error(f"LMNT STREAM: Invalid job data: missing ID")
+            return None
+        
+        try:
+            # Get download URL (same logic as _download_gcode)
+            if not gcode_url:
+                logging.info(f"LMNT STREAM: Fetching gcode_url from job details")
+                job_details_url = f"{self.integration.marketplace_url}/api/get-print-job?print_job_id={job_id}"
+                headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+                
+                async with self.http_client.get(job_details_url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        gcode_url = data.get('gcode_file_url')
+                        if not gcode_url:
+                            logging.error("LMNT STREAM: No gcode_file_url found in job details")
+                            return None
+                    else:
+                        error_text = await response.text()
+                        logging.error(f"LMNT STREAM: Failed to get job details: {error_text}")
+                        return None
+            
+            # Determine download URL (same logic as _download_gcode)
+            if "storage.googleapis.com" in gcode_url:
+                download_url = f"{self.integration.marketplace_url}/api/print/download-gcode?print_job_id={job_id}"
+            else:
+                download_url = gcode_url
+            
+            # Stream encrypted data directly to memfd
+            headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
+            
+            start_time = time.time()
+            async with self.http_client.get(download_url, headers=headers) as response:
+                elapsed_ms = int((time.time() - start_time) * 1000)
+                logging.info(f"LMNT STREAM: Response received in {elapsed_ms}ms with status: {response.status}")
+                
+                if response.status == 200:
+                    # Read encrypted content and save to memfd
+                    encrypted_data = await response.read()
+                    content_size = len(encrypted_data)
+                    logging.info(f"LMNT STREAM: Streamed {content_size} bytes of encrypted GCode to memory")
+                    
+                    # Create memfd and write encrypted data
+                    memfd = os.memfd_create(f"encrypted_gcode_{job_id}", 0)
+                    os.write(memfd, encrypted_data)
+                    os.lseek(memfd, 0, os.SEEK_SET)  # Reset to beginning for reading
+                    
+                    logging.info(f"LMNT STREAM: Successfully saved encrypted job {job_id} to memfd")
+                    return memfd
+                else:
+                    error_text = await response.text()
+                    logging.error(f"LMNT STREAM: Stream failed with status {response.status}: {error_text}")
+                    return None
+                    
+        except Exception as e:
+            logging.error(f"LMNT STREAM: Error streaming job {job_id}: {str(e)}")
+            return None
+
+    async def _start_print(self, job, encrypted_memfd):
         try:
             job_id = job.get('id')
             if not job_id:
@@ -627,7 +697,7 @@ class JobManager:
             self.print_job_started = True
             
             # Read encrypted G-code from memfd
-            memfd_file = os.fdopen(mem_fd, 'rb')
+            memfd_file = os.fdopen(encrypted_memfd, 'rb')
             encrypted_gcode = memfd_file.read()
             memfd_file.close()
 
@@ -654,6 +724,7 @@ class JobManager:
                             logging.info(f"LMNT PRINT: Successfully started job {job_id}, beginning progress monitoring.")
                             # Start monitoring for marketplace status reporting
                             asyncio.create_task(self._monitor_print_progress(job_id))
+                            return True
                         else:
                             logging.error(f"LMNT PRINT: Encrypted print endpoint returned error: {response_data}")
                             await self._update_job_status(job_id, "failed", f"Print start error: {response_data}")
@@ -673,7 +744,6 @@ class JobManager:
                     self.print_job_started = False
                     return False
 
-            logging.info(f"LMNT PRINT: Successfully initiated print job {job_id}")
             return True
 
         except Exception as e:

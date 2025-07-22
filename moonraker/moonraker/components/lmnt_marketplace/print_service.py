@@ -113,6 +113,54 @@ class UnifiedPrintService:
                 error_message=str(e)
             )
     
+    async def start_print_with_decrypted_memfd(self, job_id: str, decrypted_memfd: int, filename: str) -> PrintResult:
+        """
+        Start a print job with pre-decrypted memfd data
+        
+        Args:
+            job_id: Job identifier
+            decrypted_memfd: File descriptor containing decrypted GCode
+            filename: Virtual filename for the print
+            
+        Returns:
+            PrintResult with success status
+        """
+        logging.info(f"[PrintService] Starting print with pre-decrypted memfd for job {job_id}")
+        
+        try:
+            # Parse metadata using the decrypted memfd
+            metadata = await self._parse_metadata_from_memfd(decrypted_memfd, {})
+            
+            # Extract layer count using the decrypted memfd
+            layer_count = await self._extract_layer_count_from_memfd(decrypted_memfd)
+            metadata['layer_count'] = layer_count
+            
+            # Start the print using the decrypted memfd
+            success = await self._start_klipper_print(decrypted_memfd, filename, metadata)
+            
+            if success:
+                result = PrintResult(
+                    success=True,
+                    memfd=decrypted_memfd,
+                    metadata=metadata,
+                    layer_count=layer_count
+                )
+                self.active_prints[job_id] = result
+                logging.info(f"[PrintService] Successfully started print for job {job_id}")
+                return result
+            else:
+                return PrintResult(
+                    success=False,
+                    error_message=f"Failed to start Klipper print for job {job_id}"
+                )
+                
+        except Exception as e:
+            logging.error(f"[PrintService] Error starting print with decrypted memfd for job {job_id}: {e}")
+            return PrintResult(
+                success=False,
+                error_message=str(e)
+            )
+    
     async def _decrypt_to_memfd(self, print_job: PrintJob) -> Optional[int]:
         """
         Decrypt encrypted GCode directly to memfd (single allocation)
