@@ -12,8 +12,14 @@ import json
 import logging
 import asyncio
 import aiohttp
-import time
+import hashlib
+import secrets
 import base64
+from datetime import datetime, timedelta, timezone
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 import re
 from datetime import datetime, timedelta
 import jwt
@@ -215,60 +221,125 @@ class AuthManager:
         return False
 
     def _load_dlt_private_key(self):
-        """Load the DLT private key from secure storage."""
-        # Define the path to the DLT private key file
-        # Ensure self.integration.tokens_path is available and valid
+        """
+        Load DLT private key from disk, supporting both legacy and encrypted formats
+        """
         if not hasattr(self.integration, 'tokens_path') or not self.integration.tokens_path:
             logging.error("LMNT AUTH DLT: tokens_path not configured in integration object.")
             return False
         
-        dlt_key_filename = "printer_dlt_private_key.hex"
-        dlt_key_file_path = os.path.join(self.integration.tokens_path, dlt_key_filename)
-        logging.info(f"LMNT AUTH DLT: Looking for DLT private key file at {dlt_key_file_path}")
+        # Try new encrypted format first
+        enc_key_filename = "printer_dlt_private_key.enc"
+        enc_key_file_path = os.path.join(self.integration.tokens_path, enc_key_filename)
+        
+        # Also check for legacy format
+        hex_key_filename = "printer_dlt_private_key.hex"
+        hex_key_file_path = os.path.join(self.integration.tokens_path, hex_key_filename)
+        
+        logging.info(f"LMNT AUTH DLT: Looking for DLT private key file at {enc_key_file_path} or {hex_key_file_path}")
 
-        if os.path.exists(dlt_key_file_path):
+        # Try encrypted format first
+        if os.path.exists(enc_key_file_path):
             try:
-                with open(dlt_key_file_path, 'r') as f:
-                    private_key_hex = f.read().strip()
-                if private_key_hex:
-                    self.dlt_private_key = PrivateKey(private_key_hex, encoder=HexEncoder)
-                    logging.info("LMNT AUTH DLT: Successfully loaded DLT private key.")
-                    # Optionally log public key for verification if in debug mode
-                    if self.integration.debug_mode:
-                        public_key_b64 = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
-                        logging.debug(f"LMNT AUTH DLT: Loaded public key (b64): {public_key_b64[:10]}...")
-                    return True
+                with open(enc_key_file_path, 'r') as f:
+                    key_data = f.read().strip()
+                
+                if key_data:
+                    # New encrypted format
+                    logging.info("LMNT AUTH DLT: Loading encrypted private key")
+                    decrypted_private_key = self._decrypt_private_key(key_data)
+                    if decrypted_private_key:
+                        self.dlt_private_key = PrivateKey(decrypted_private_key, encoder=HexEncoder)
+                        logging.info("LMNT AUTH DLT: Successfully loaded encrypted DLT private key.")
+                        # Optionally log public key for verification if in debug mode
+                        if self.integration.debug_mode:
+                            public_key_b64 = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
+                            logging.debug(f"LMNT AUTH DLT: Loaded public key (b64): {public_key_b64[:10]}...")
+                        return True
+                    else:
+                        logging.error("LMNT AUTH DLT: Failed to decrypt DLT private key")
+                        # Could be hardware change - fall through to check legacy format
                 else:
-                    logging.warning(f"LMNT AUTH DLT: DLT private key file {dlt_key_file_path} is empty.")
+                    logging.warning(f"LMNT AUTH DLT: DLT private key file {enc_key_file_path} is empty.")
             except Exception as e:
-                logging.error(f"LMNT AUTH DLT: Error loading DLT private key from {dlt_key_file_path}: {str(e)}")
-                # Potentially corrupted key file, consider renaming/deleting it to force regeneration
-        else:
-            logging.info(f"LMNT AUTH DLT: No DLT private key file found at {dlt_key_file_path}. Will generate on registration if needed.")
+                logging.error(f"LMNT AUTH DLT: Error loading encrypted DLT private key from {enc_key_file_path}: {str(e)}")
+        
+        # Try legacy plaintext format
+        if os.path.exists(hex_key_file_path):
+            try:
+                with open(hex_key_file_path, 'r') as f:
+                    key_data = f.read().strip()
+                
+                if key_data:
+                    # Legacy plaintext format - migrate to encrypted
+                    logging.info("LMNT AUTH DLT: Migrating plaintext private key to encrypted format")
+                    
+                    # Load the key first to verify it's valid
+                    try:
+                        self.dlt_private_key = PrivateKey(key_data, encoder=HexEncoder)
+                    except Exception as e:
+                        logging.error(f"LMNT AUTH DLT: Invalid plaintext private key: {e}")
+                        return False
+                    
+                    # Encrypt and save the key
+                    if self._save_dlt_private_key_to_disk(key_data):
+                        logging.info("LMNT AUTH DLT: Successfully migrated to encrypted private key")
+                        
+                        # Remove old plaintext file
+                        try:
+                            os.remove(hex_key_file_path)
+                            logging.info("LMNT AUTH DLT: Removed old plaintext key file")
+                        except Exception as e:
+                            logging.warning(f"LMNT AUTH DLT: Could not remove old plaintext key file: {e}")
+                        
+                        # Optionally log public key for verification if in debug mode
+                        if self.integration.debug_mode:
+                            public_key_b64 = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
+                            logging.debug(f"LMNT AUTH DLT: Loaded public key (b64): {public_key_b64[:10]}...")
+                        return True
+                    else:
+                        logging.error("LMNT AUTH DLT: Failed to migrate private key to encrypted format")
+                        return False
+                else:
+                    logging.warning(f"LMNT AUTH DLT: Legacy DLT private key file {hex_key_file_path} is empty.")
+            except Exception as e:
+                logging.error(f"LMNT AUTH DLT: Error loading legacy DLT private key from {hex_key_file_path}: {str(e)}")
+                
+        logging.warning(f"LMNT AUTH DLT: DLT private key not found. Will need to generate a new one.")
         return False
 
-    def _save_dlt_private_key(self, private_key_hex_str):
-        """Save the DLT private key (hex encoded string) to secure storage."""
-        if not private_key_hex_str:
-            logging.error("LMNT AUTH DLT: Cannot save empty DLT private key string.")
-            return False
-
+    def _save_dlt_private_key_to_disk(self, private_key_hex_str):
+        """
+        Save DLT private key to disk in encrypted format
+        """
         if not hasattr(self.integration, 'tokens_path') or not self.integration.tokens_path:
             logging.error("LMNT AUTH DLT: tokens_path not configured in integration object for saving.")
             return False
 
-        dlt_key_filename = "printer_dlt_private_key.hex"
+        dlt_key_filename = "printer_dlt_private_key.enc"  # Changed extension to .enc
         dlt_key_file_path = os.path.join(self.integration.tokens_path, dlt_key_filename)
         
         try:
+            # Encrypt the private key
+            encrypted_private_key = self._encrypt_private_key(private_key_hex_str)
+            if not encrypted_private_key:
+                logging.error("LMNT AUTH DLT: Failed to encrypt DLT private key")
+                return False
+            
+            # Write encrypted key to file
             with open(dlt_key_file_path, 'w') as f:
-                f.write(private_key_hex_str)
-            # Ensure file has restricted permissions if possible (platform dependent)
-            # os.chmod(dlt_key_file_path, 0o600) # Example, might not work on all OS or without sudo
-            logging.info(f"LMNT AUTH DLT: Successfully saved DLT private key to {dlt_key_file_path}")
+                f.write(encrypted_private_key)
+            
+            # Set secure file permissions
+            try:
+                os.chmod(dlt_key_file_path, 0o600)  # Owner read/write only
+            except Exception as e:
+                logging.warning(f"LMNT AUTH DLT: Could not set secure permissions on key file: {e}")
+            
+            logging.info(f"LMNT AUTH DLT: Successfully saved encrypted DLT private key to {dlt_key_file_path}")
             return True
-        except IOError as e:
-            logging.error(f"LMNT AUTH DLT: Error saving DLT private key to {dlt_key_file_path}: {str(e)}")
+        except Exception as e:
+            logging.error(f"LMNT AUTH DLT: Error saving encrypted DLT private key to {dlt_key_file_path}: {str(e)}")
             return False
 
     def save_printer_token(self, token, expiry):
@@ -1189,3 +1260,177 @@ class AuthManager:
         except Exception as e:
             logging.error(f"Error validating printer token: {str(e)}")
             return None
+
+    def _get_hardware_fingerprint(self):
+        """
+        Generate hardware-specific fingerprint for key derivation
+        Uses multiple hardware identifiers to create unique machine fingerprint
+        """
+        try:
+            fingerprint_data = []
+            
+            # CPU info (Linux/Raspberry Pi)
+            try:
+                with open('/proc/cpuinfo', 'r') as f:
+                    for line in f:
+                        if 'Serial' in line or 'Hardware' in line:
+                            fingerprint_data.append(line.strip())
+            except:
+                pass
+            
+            # Machine ID (systemd)
+            try:
+                with open('/etc/machine-id', 'r') as f:
+                    fingerprint_data.append(f.read().strip())
+            except:
+                pass
+            
+            # Network MAC addresses
+            try:
+                import uuid
+                mac = uuid.getnode()
+                fingerprint_data.append(str(mac))
+            except:
+                pass
+            
+            # Boot ID (changes on reboot, but provides additional entropy)
+            try:
+                with open('/proc/sys/kernel/random/boot_id', 'r') as f:
+                    boot_id = f.read().strip()
+                    # Use only part of boot_id to avoid issues with reboots
+                    fingerprint_data.append(boot_id[:8])
+            except:
+                pass
+            
+            # Fallback to hostname if nothing else available
+            if not fingerprint_data:
+                import socket
+                fingerprint_data.append(socket.gethostname())
+            
+            # Create stable hash
+            combined = '|'.join(sorted(fingerprint_data))
+            fingerprint = hashlib.sha256(combined.encode()).digest()
+            
+            logging.debug(f"LMNT AUTH: Generated hardware fingerprint from {len(fingerprint_data)} sources")
+            return fingerprint
+            
+        except Exception as e:
+            logging.warning(f"LMNT AUTH: Could not generate hardware fingerprint: {e}")
+            # Fallback to a default (less secure but functional)
+            return hashlib.sha256(b"fallback_fingerprint").digest()
+
+    def _derive_encryption_key(self, hardware_fingerprint, salt):
+        """
+        Derive encryption key from hardware fingerprint using PBKDF2
+        """
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,  # 256-bit key
+            salt=salt,
+            iterations=100000,  # Strong iteration count
+            backend=default_backend()
+        )
+        return kdf.derive(hardware_fingerprint)
+
+    def _encrypt_private_key(self, private_key_hex):
+        """
+        Encrypt private key using hardware-bound encryption
+        
+        Returns:
+            str: Base64-encoded encrypted data (salt + iv + encrypted_key)
+        """
+        try:
+            # Generate random salt and IV
+            salt = secrets.token_bytes(32)
+            iv = secrets.token_bytes(16)
+            
+            # Derive encryption key from hardware
+            hardware_fp = self._get_hardware_fingerprint()
+            encryption_key = self._derive_encryption_key(hardware_fp, salt)
+            
+            # Encrypt the private key
+            cipher = Cipher(
+                algorithms.AES(encryption_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            encryptor = cipher.encryptor()
+            
+            # Pad private key to block size
+            private_key_bytes = private_key_hex.encode('utf-8')
+            padding_length = 16 - (len(private_key_bytes) % 16)
+            padded_key = private_key_bytes + bytes([padding_length] * padding_length)
+            
+            encrypted_key = encryptor.update(padded_key) + encryptor.finalize()
+            
+            # Return base64-encoded salt + iv + encrypted_key
+            encrypted_data = salt + iv + encrypted_key
+            return base64.b64encode(encrypted_data).decode('utf-8')
+            
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Failed to encrypt private key: {e}")
+            return None
+
+    def _decrypt_private_key(self, encrypted_data_b64):
+        """
+        Decrypt private key using hardware-bound decryption
+        
+        Args:
+            encrypted_data_b64 (str): Base64-encoded salt + iv + encrypted_key
+            
+        Returns:
+            str: Decrypted private key hex string
+        """
+        try:
+            # Decode from base64
+            encrypted_data = base64.b64decode(encrypted_data_b64)
+            
+            if len(encrypted_data) < 48:  # 32 (salt) + 16 (iv) minimum
+                logging.error("LMNT AUTH: Encrypted data too short")
+                return None
+                
+            # Extract components
+            salt = encrypted_data[:32]
+            iv = encrypted_data[32:48]
+            encrypted_key = encrypted_data[48:]
+            
+            # Derive decryption key from hardware
+            hardware_fp = self._get_hardware_fingerprint()
+            decryption_key = self._derive_encryption_key(hardware_fp, salt)
+            
+            # Decrypt the private key
+            cipher = Cipher(
+                algorithms.AES(decryption_key),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            
+            decrypted_padded = decryptor.update(encrypted_key) + decryptor.finalize()
+            
+            # Remove padding
+            padding_length = decrypted_padded[-1]
+            private_key_bytes = decrypted_padded[:-padding_length]
+            
+            return private_key_bytes.decode('utf-8')
+            
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Failed to decrypt private key: {e}")
+            return None
+
+    def _is_key_encrypted(self, key_data):
+        """
+        Check if the key data is encrypted (base64) or plaintext hex
+        
+        Returns:
+            bool: True if encrypted, False if plaintext
+        """
+        try:
+            # Encrypted keys are base64 encoded and longer
+            if len(key_data) > 64 and '=' in key_data:
+                # Try to decode as base64
+                base64.b64decode(key_data)
+                return True
+            return False
+        except:
+            return False

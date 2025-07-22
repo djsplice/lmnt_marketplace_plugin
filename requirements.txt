@@ -1,0 +1,4 @@
+# LMNT Marketplace Plugin Security Dependencies
+# Required for hardware-bound private key encryption
+
+cryptography>=41.0.0  # For AES encryption, PBKDF2, and secure key derivation
