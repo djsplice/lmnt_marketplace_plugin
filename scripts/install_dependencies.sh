@@ -25,7 +25,7 @@ pip install PyJWT
 
 # Install any other dependencies your plugin needs
 echo "Installing other dependencies (including PyNaCl for DLT crypto)..."
-pip install aiohttp requests cryptography PyNaCl>=1.5.0
+pip install aiohttp requests cryptography>=41.0.0 PyNaCl>=1.5.0
 
 # Deactivate the virtual environment
 deactivate
