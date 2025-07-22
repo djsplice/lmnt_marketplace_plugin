@@ -56,6 +56,9 @@ class LmntMarketplaceIntegration:
         os.makedirs(self.metadata_path, exist_ok=True)
         os.makedirs(self.thumbnails_path, exist_ok=True)
         
+        # Set secure permissions on sensitive directories
+        self._secure_directory_permissions()
+        
         logging.info(f"LMNT data paths: tokens={self.tokens_path}, keys={self.keys_path}, encrypted={self.encrypted_path}, metadata={self.metadata_path}, thumbnails={self.thumbnails_path}")
         
         # API endpoints
@@ -175,3 +178,29 @@ class LmntMarketplaceIntegration:
             logging.info("Closed HTTP client")
             
         logging.info("LMNT Marketplace Integration closed")
+
+    def _secure_directory_permissions(self):
+        """
+        Set restrictive permissions on sensitive directories and files
+        """
+        try:
+            # Secure the main LMNT directory (700 = owner read/write/execute only)
+            lmnt_data_path = os.path.dirname(self.tokens_path)
+            os.chmod(lmnt_data_path, 0o700)
+            
+            # Secure sensitive subdirectories
+            for sensitive_path in [self.tokens_path, self.keys_path]:
+                os.chmod(sensitive_path, 0o700)  # Owner only
+                
+            # Less sensitive directories can be slightly more permissive
+            for path in [self.metadata_path, self.thumbnails_path]:
+                os.chmod(path, 0o750)  # Owner + group read
+                
+            # The encrypted path should be owner-only since we're eliminating disk storage
+            os.chmod(self.encrypted_path, 0o700)
+            
+            logging.info("LMNT: Applied secure file permissions to sensitive directories")
+            
+        except Exception as e:
+            logging.warning(f"LMNT: Could not set secure permissions: {e}")
+            # Continue anyway - permissions are a security enhancement, not critical for functionality
