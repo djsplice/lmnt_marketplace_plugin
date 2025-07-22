@@ -365,12 +365,12 @@ class JobManager:
         self.current_print_job = job
         await self._update_job_status(job_id, "processing")
         
-        # Stream and decrypt GCode directly to memory (never touches disk)
-        logging.info(f"LMNT PROCESS: Streaming and decrypting GCode for job {job_id}")
-        mem_fd = await self._stream_and_decrypt_gcode(job)
+        # Stream encrypted GCode directly to memory (never touches disk)
+        logging.info(f"LMNT PROCESS: Streaming encrypted GCode for job {job_id}")
+        mem_fd = await self._stream_encrypted_gcode_to_memfd(job)
         if not mem_fd:
-            logging.error(f"LMNT PROCESS: Failed to stream/decrypt GCode for job {job_id}")
-            await self._update_job_status(job_id, "failed", "Failed to stream/decrypt GCode")
+            logging.error(f"LMNT PROCESS: Failed to stream encrypted GCode for job {job_id}")
+            await self._update_job_status(job_id, "failed", "Failed to stream encrypted GCode")
             self.current_print_job = None
             return
         
@@ -603,16 +603,16 @@ class JobManager:
         
         return None
     
-    async def _stream_and_decrypt_gcode(self, job):
+    async def _stream_encrypted_gcode_to_memfd(self, job):
         """
-        Stream encrypted GCode directly from API and decrypt to memory without disk storage
+        Stream encrypted GCode directly from API to memfd without disk storage
         
         Args:
-            job (dict): Job information including ID, URL, and crypto parameters
+            job (dict): Job information including ID and URL
             
         Returns:
-            int: File descriptor of memfd containing decrypted GCode
-            None: If streaming/decryption failed
+            int: File descriptor of memfd containing encrypted GCode
+            None: If streaming failed
         """
         job_id = job.get('id')
         gcode_url = job.get('gcode_url')
@@ -648,7 +648,7 @@ class JobManager:
             else:
                 download_url = gcode_url
             
-            # Stream encrypted data directly to memory
+            # Stream encrypted data directly to memfd
             headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}
             
             start_time = time.time()
@@ -657,34 +657,18 @@ class JobManager:
                 logging.info(f"LMNT STREAM: Response received in {elapsed_ms}ms with status: {response.status}")
                 
                 if response.status == 200:
-                    # Read encrypted content directly into memory
+                    # Read encrypted content and save to memfd
                     encrypted_data = await response.read()
                     content_size = len(encrypted_data)
                     logging.info(f"LMNT STREAM: Streamed {content_size} bytes of encrypted GCode to memory")
                     
-                    # Decrypt DEK first
-                    dek_package = job.get('gcode_dek_package')
-                    if not dek_package:
-                        logging.error(f"LMNT STREAM: Missing gcode_dek_package for job {job_id}")
-                        return None
+                    # Create memfd and write encrypted data
+                    memfd = os.memfd_create(f"encrypted_gcode_{job_id}", 0)
+                    os.write(memfd, encrypted_data)
+                    os.lseek(memfd, 0, os.SEEK_SET)  # Reset to beginning for reading
                     
-                    dek = await self.integration.crypto_manager.decrypt_dek(dek_package)
-                    if not dek:
-                        logging.error(f"LMNT STREAM: Failed to decrypt DEK for job {job_id}")
-                        return None
-                    
-                    # Decrypt GCode directly to memfd (never touches disk)
-                    iv_hex = job.get('gcode_iv_hex')
-                    memfd = await self.integration.crypto_manager.decrypt_gcode_bytes_to_memory(
-                        encrypted_data, dek, iv_hex, job_id
-                    )
-                    
-                    if memfd:
-                        logging.info(f"LMNT STREAM: Successfully decrypted job {job_id} to memory")
-                        return memfd
-                    else:
-                        logging.error(f"LMNT STREAM: Failed to decrypt job {job_id}")
-                        return None
+                    logging.info(f"LMNT STREAM: Successfully saved encrypted job {job_id} to memfd")
+                    return memfd
                 else:
                     error_text = await response.text()
                     logging.error(f"LMNT STREAM: Stream failed with status {response.status}: {error_text}")
@@ -694,7 +678,7 @@ class JobManager:
             logging.error(f"LMNT STREAM: Error streaming job {job_id}: {str(e)}")
             return None
 
-    async def _start_print(self, job, mem_fd):
+    async def _start_print(self, job, encrypted_memfd):
         try:
             job_id = job.get('id')
             if not job_id:
@@ -713,7 +697,7 @@ class JobManager:
             self.print_job_started = True
             
             # Read encrypted G-code from memfd
-            memfd_file = os.fdopen(mem_fd, 'rb')
+            memfd_file = os.fdopen(encrypted_memfd, 'rb')
             encrypted_gcode = memfd_file.read()
             memfd_file.close()
 
@@ -740,6 +724,7 @@ class JobManager:
                             logging.info(f"LMNT PRINT: Successfully started job {job_id}, beginning progress monitoring.")
                             # Start monitoring for marketplace status reporting
                             asyncio.create_task(self._monitor_print_progress(job_id))
+                            return True
                         else:
                             logging.error(f"LMNT PRINT: Encrypted print endpoint returned error: {response_data}")
                             await self._update_job_status(job_id, "failed", f"Print start error: {response_data}")
@@ -759,7 +744,6 @@ class JobManager:
                     self.print_job_started = False
                     return False
 
-            logging.info(f"LMNT PRINT: Successfully initiated print job {job_id}")
             return True
 
         except Exception as e:
