@@ -151,7 +151,7 @@ class JobManager:
             return
         
         # Get the API endpoint URL
-        api_url = f"{self.integration.marketplace_url}/api/poll-print-queue"
+        api_url = f"{self.integration.marketplace_url}/api/printers/poll-print-queue"
         logging.info(f"LMNT JOB POLLING: Polling for jobs at: {api_url} for printer ID: {printer_id}")
         
         # Get the printer token for authentication
@@ -231,9 +231,9 @@ class JobManager:
                         logging.info("LMNT JOB POLLING: No pending jobs found")
                     
                 elif response.status == 401:
-                    # Token might be expired, try to refresh it
-                    logging.warning("LMNT JOB POLLING: Received 401 Unauthorized, attempting to refresh token")
-                    await self.integration.auth_manager.refresh_printer_token()
+                    # Token is invalid or expired. The printer may need to be re-registered.
+                    error_text = await response.text()
+                    logging.error(f"LMNT JOB POLLING: Received 401 Unauthorized. The printer token is invalid and may need to be re-registered. Details: {error_text}")
                     
                 else:
                     # Log other error responses
@@ -873,7 +873,7 @@ class JobManager:
             logging.error("Cannot update job status: No printer token available")
             return False
         
-        update_url = f"{self.integration.marketplace_url}/api/{self.integration.api_version}/job-status/{job_id}"
+        update_url = f"{self.integration.marketplace_url}/api/printers/{self.integration.api_version}/job-status/{job_id}"
         
         try:
             headers = {"Authorization": f"Bearer {self.integration.auth_manager.printer_token}"}

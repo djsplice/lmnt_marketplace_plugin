@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.3.0] - 2025-07-31
+
+### Security
+- **Hydra OAuth2/OIDC Integration**: Updated authentication system to work with the new Ory Hydra OAuth2/OIDC provider used by the LMNT Marketplace.
+- **Token Refresh Mechanism**: Enhanced the automatic token refresh functionality to work with Hydra-issued JWTs, ensuring continuous printer authentication.
+- **Improved JWT Validation**: Updated token validation to properly handle audience claims and token expiration.
+
+### Changed
+- **Authentication Endpoints**: Updated all authentication-related API calls to use the new endpoints in the Marketplace API.
+- **Token Format**: Modified token handling to work with the standardized JWT format from Hydra, including proper parsing of standard claims.
+- **Response Format**: Updated code to handle the new response format from the `/api/printers/refresh-printer-token` endpoint.
+
+### Added
+- **Test Utility**: Added a Node.js test script (`test-refresh-token.js`) for verifying printer token refresh functionality.
+- **Automatic Recovery**: Enhanced error handling to automatically re-register the printer if token refresh fails due to an expired token.
+
 ## [1.2.0] - 2025-07-16
 
 ### Fixed

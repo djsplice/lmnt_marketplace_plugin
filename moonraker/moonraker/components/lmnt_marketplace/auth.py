@@ -128,13 +128,7 @@ class AuthManager:
             transports=["http"]
         )
         
-        # Token refresh endpoint
-        register_endpoint(
-            "/lmnt/refresh_token", 
-            ["POST"], 
-            self._handle_refresh_token,
-            transports=["http"]
-        )
+
     
     def load_printer_token(self):
         """Load saved printer token and kek_id from secure storage"""
@@ -151,13 +145,14 @@ class AuthManager:
             try:
                 with open(token_file, 'r') as f:
                     data = json.load(f)
-                    self.printer_token = data.get('token')
-                    expiry_str = data.get('expiry')
+                    self.printer_token = data.get('printer_token')
+                    self.token_expires_at = data.get('token_expires')
                     created_at_str = data.get('created_at')
                     self.printer_name = data.get('printer_name')
+                    self.printer_id = data.get('printer_id') # Load printer_id directly from file
                     
-                    if expiry_str:
-                        self.token_expiry = datetime.fromisoformat(expiry_str)
+                    if self.token_expires_at:
+                        self.token_expiry = datetime.fromisoformat(self.token_expires_at)
                     
                     if created_at_str:
                         self.token_created_at = datetime.fromisoformat(created_at_str)
@@ -173,22 +168,16 @@ class AuthManager:
                     if self.printer_token:
                         logging.info(f"LMNT AUTH: Token loaded, attempting to extract printer ID...")
                         
-                        # Always extract printer ID first, even if token is expired
-                        # The JobManager needs the printer ID to function
-                        self.printer_id = self._get_printer_id_from_token()
-                        
                         if self.printer_id:
-                            logging.info(f"LMNT AUTH: Successfully extracted printer ID: {self.printer_id}")
+                            logging.info(f"LMNT AUTH: Successfully loaded printer ID from file: {self.printer_id}")
                         else:
-                            logging.error("LMNT AUTH: Token loaded but no printer ID found in token")
-                            # Let's try to decode the token and see what's in it
-                            payload = self._decode_token(self.printer_token)
-                            if payload:
-                                logging.error(f"LMNT AUTH: Token payload keys: {list(payload.keys())}")
-                                if self.integration.debug_mode:
-                                    logging.debug(f"LMNT AUTH: Full token payload: {payload}")
+                            # Fallback for older token files: try to extract from JWT
+                            logging.info("LMNT AUTH: Printer ID not in file, attempting to extract from token...")
+                            self.printer_id = self._get_printer_id_from_token()
+                            if self.printer_id:
+                                logging.info(f"LMNT AUTH: Successfully extracted printer ID from token: {self.printer_id}")
                             else:
-                                logging.error("LMNT AUTH: Failed to decode token payload")
+                                logging.error("LMNT AUTH: Failed to get printer ID from file or token.")
                         
                         # Check if token is already expired
                         now = self._get_timezone_aware_now()
@@ -342,7 +331,7 @@ class AuthManager:
             logging.error(f"LMNT AUTH DLT: Error saving encrypted DLT private key to {dlt_key_file_path}: {str(e)}")
             return False
 
-    def save_printer_token(self, token, expiry):
+    def save_printer_token(self, token, expiry, printer_id=None):
         """Save printer token to secure storage"""
         if not token:
             logging.error("Cannot save empty printer token")
@@ -354,10 +343,11 @@ class AuthManager:
             now = datetime.now()
             with open(token_file, 'w') as f:
                 json.dump({
-                    'token': token,
-                    'expiry': expiry.isoformat() if expiry else None,
+                    'printer_token': token,
+                    'token_expires': expiry.isoformat() if expiry else None,
                     'created_at': now.isoformat(),
-                    'printer_name': self.printer_name if hasattr(self, 'printer_name') else None
+                    'printer_name': self.printer_name if hasattr(self, 'printer_name') else None,
+                    'printer_id': self.printer_id
                 }, f)
             
             # Update in-memory token
@@ -365,8 +355,11 @@ class AuthManager:
             self.token_expiry = expiry
             self.token_created_at = now
             
-            # Extract printer_id from token
-            self.printer_id = self._get_printer_id_from_token()
+            if printer_id:
+                self.printer_id = printer_id
+            else:
+                # Fallback to decoding from token if not provided
+                self.printer_id = self._get_printer_id_from_token()
             
             # Log with redacted token if not in debug mode
             if self.integration.debug_mode:
@@ -813,120 +806,87 @@ class AuthManager:
         logging.warning("LMNT AUTH: Or use the LMNT Marketplace UI to re-register this printer")
         
         return False
-        
+    
     async def refresh_printer_token(self):
         """
-        Refresh the printer token with the marketplace
+        Refresh the printer's JWT token before it expires
         
-        Uses the /api/refresh-printer-token endpoint which is specifically
-        designed for printer token refresh. This endpoint validates the current printer token
-        and issues a new one with extended expiration.
+        This method calls the marketplace API to get a new token with extended expiration.
+        It updates the stored token and schedules the next refresh check.
         
         Returns:
             bool: True if refresh was successful, False otherwise
         """
         if not self.printer_token:
-            logging.error("LMNT AUTH: Cannot refresh printer token: No token available")
+            logging.warning("LMNT AUTH: Cannot refresh token - no current token available")
             return False
-        
-        # First verify that the token is valid (not malformed)
-        if not self._decode_token(self.printer_token):
-            logging.error("LMNT AUTH: Cannot refresh token: Token is invalid or malformed")
-            return await self._handle_expired_token()
-        
-        refresh_url = f"{self.integration.marketplace_url}/api/refresh-printer-token"
-        
+            
         try:
-            headers = {"Authorization": f"Bearer {self.printer_token}"}
+            logging.info("LMNT AUTH: Attempting to refresh printer token...")
             
-            # Redact sensitive information in headers
-            redacted_headers = self._redact_sensitive_data(headers)
-            logging.info(f"LMNT AUTH: Sending token refresh request with headers: {redacted_headers}")
+            # Prepare the refresh request
+            refresh_url = f"{self.integration.marketplace_api_url}/api/printers/refresh-printer-token"
+            headers = {
+                'Authorization': f'Bearer {self.printer_token}',
+                'Content-Type': 'application/json'
+            }
             
-            # Track start time for performance monitoring
-            start_time = datetime.now()
+            # Make the refresh request
+            response = await self.http_client.post(
+                refresh_url,
+                headers=headers,
+                data=json.dumps({}),  # Empty body for POST request
+                timeout=30
+            )
             
-            async with self.http_client.post(refresh_url, headers=headers) as response:
-                # Calculate response time for monitoring
-                response_time = (datetime.now() - start_time).total_seconds()
-                logging.info(f"LMNT AUTH: Token refresh API response time: {response_time:.2f} seconds")
+            if response.status_code == 200:
+                refresh_data = response.json()
                 
-                if response.status == 200:
-                    data = await response.json()
-                    # Redact sensitive information in response
-                    redacted_data = self._redact_sensitive_data(data, is_json=True)
-                    logging.info(f"LMNT AUTH: Token refresh response: {redacted_data}")
-                    
-                    # Try both field names - some APIs use 'token', others use 'printer_token'
-                    new_token = data.get('printer_token') or data.get('token')
-                    
-                    if new_token:
-                        # First validate the new token
-                        if not self._decode_token(new_token):
-                            logging.error("LMNT AUTH: Received invalid token from refresh endpoint")
-                            return False
-                        
-                        # Try to get expiry directly from JWT token
-                        jwt_expiry = self._get_token_expiry_from_jwt(new_token)
-                        if jwt_expiry:
-                            expiry = jwt_expiry
-                            logging.info(f"LMNT AUTH: Using expiry from JWT token: {expiry}")
-                        else:
-                            # Fall back to response fields if JWT doesn't have expiry
-                            # Try both field names - some APIs use 'token_expires', others use 'expiry'
-                            token_expires = data.get('token_expires') or data.get('expiry')
-                            expiry = None
-                            if token_expires:
-                                try:
-                                    expiry = datetime.fromisoformat(token_expires.replace('Z', '+00:00'))
-                                    logging.info(f"LMNT AUTH: Using expiry date from response: {expiry}")
-                                except ValueError:
-                                    # Calculate expiry (30 days from now) if parsing fails
-                                    expiry = datetime.now() + timedelta(days=30)
-                                    logging.warning(f"LMNT AUTH: Could not parse token expiry: {token_expires}, using default")
-                            else:
-                                # Calculate expiry (30 days from now) if not provided
-                                expiry = datetime.now() + timedelta(days=30)
-                                logging.info("LMNT AUTH: No expiry in response, using default 30 days")
-                        
-                        # Save the new token
-                        self.save_printer_token(new_token, expiry)
-                        logging.info("LMNT AUTH: Printer token refreshed successfully")
-                        return True
-                    else:
-                        logging.error("LMNT AUTH: Token refresh response missing token or printer_token field")
-                elif response.status == 401:
-                    # Token is expired or invalid, try re-registration
-                    error_text = await response.text()
-                    logging.warning(f"LMNT AUTH: Token refresh failed with 401 status: {error_text}")
-                    return await self._handle_expired_token()
-                else:
-                    error_text = await response.text()
-                    logging.error(f"LMNT AUTH: Token refresh failed with status {response.status}: {error_text}")
-                    
-                    # For 5xx errors, retry sooner
-                    if 500 <= response.status < 600:
-                        logging.info("LMNT AUTH: Server error detected, scheduling retry in 15 minutes")
-                        self.integration.eventloop.delay_callback(
-                            15 * 60, self.refresh_printer_token)
-                        return False
-        except aiohttp.ClientError as e:
-            logging.error(f"LMNT AUTH: Network error refreshing printer token: {str(e)}")
-            # Network errors should retry sooner
-            self.integration.eventloop.delay_callback(
-                5 * 60, self.refresh_printer_token)
-            return False
+                # Extract the new token and expiry from the response
+                new_token = refresh_data.get('printer_token')
+                token_expires_str = refresh_data.get('token_expires')
+                
+                if not new_token or not token_expires_str:
+                    logging.error("LMNT AUTH: Refresh response missing required fields")
+                    return False
+                
+                # Parse the expiry date
+                try:
+                    new_expiry = datetime.fromisoformat(token_expires_str.replace('Z', '+00:00'))
+                except ValueError as e:
+                    logging.error(f"LMNT AUTH: Failed to parse token expiry: {e}")
+                    return False
+                
+                # Update our stored token information
+                old_token = self.printer_token
+                self.printer_token = new_token
+                self.token_expiry = new_expiry
+                self.token_created_at = datetime.now(timezone.utc)
+                
+                # Save the new token to disk
+                self.save_printer_token(new_token, new_expiry)
+                
+                logging.info(f"LMNT AUTH: Successfully refreshed printer token, expires: {new_expiry.isoformat()}")
+                
+                # Schedule the next refresh check
+                self.check_token_refresh()
+                
+                return True
+                
+            elif response.status_code == 401:
+                logging.warning("LMNT AUTH: Token refresh failed - token is invalid or expired")
+                # Handle expired token
+                await self._handle_expired_token()
+                return False
+                
+            else:
+                logging.error(f"LMNT AUTH: Token refresh failed with status {response.status_code}: {response.text}")
+                return False
+                
         except Exception as e:
-            logging.error(f"LMNT AUTH: Error refreshing printer token: {str(e)}")
-            import traceback
-            logging.error(f"LMNT AUTH: {traceback.format_exc()}")
-        
-        # Schedule another attempt in 1 hour if refresh failed
-        logging.info("LMNT AUTH: Scheduling next token refresh attempt in 1 hour")
-        self.integration.eventloop.delay_callback(
-            60 * 60, self.check_token_refresh)
-        return False
-    
+            logging.error(f"LMNT AUTH: Exception during token refresh: {e}")
+            return False
+
     async def login_user(self, username, password):
         """Login user to the LMNT Marketplace
         
@@ -1004,7 +964,7 @@ class AuthManager:
         Register printer with the LMNT Marketplace
         
         Args:
-            user_token: User's JWT token
+            user_token: User's raw JWT token string
             printer_name: Name for the printer
             manufacturer: Printer manufacturer (optional)
             model: Printer model (optional)
@@ -1013,14 +973,15 @@ class AuthManager:
             dict: Registration response
         """
         try:
-            if not printer_name:
-                raise self.integration.server.error("Missing printer name", 400)
-            
             if not user_token:
                 raise self.integration.server.error("Missing user token", 401)
+
+            printer_name = printer_name
+            manufacturer = manufacturer or "LMNT Printer"  # Default if None or empty
+            model = model or "Klipper"  # Default if None or empty
             
-            # Store user token temporarily for registration
-            self.user_token = user_token
+            if not printer_name:
+                raise self.integration.server.error("Missing printer name", 400)
             
             # Register printer with marketplace using the correct endpoint
             register_url = f"{self.integration.marketplace_url}/api/register-printer"
@@ -1056,7 +1017,7 @@ class AuthManager:
                 logging.warning("LMNT AUTH DLT: DLT private key not available. Proceeding with registration without DLT public key.")
             
             # Use standard Authorization header for the marketplace API
-            headers = {"Authorization": f"Bearer {self.user_token}"}
+            headers = {"Authorization": f"Bearer {user_token}"}
             
             # Store printer name for potential re-registration later
             self.printer_name = printer_name
@@ -1112,7 +1073,7 @@ class AuthManager:
                                 except ValueError:
                                     logging.warning(f"Could not parse token expiry: {token_expires}")
                             
-                            self.save_printer_token(printer_token, expiry)
+                            self.save_printer_token(printer_token, expiry, retrieved_printer_id)
                             logging.info(f"Printer registered successfully with ID: {self.printer_id}.")
                         else:
                             missing = [item for item, val in [('printer_token', printer_token), ('printer_id', retrieved_printer_id)] if not val]
@@ -1135,23 +1096,25 @@ class AuthManager:
     async def _handle_register_printer(self, web_request):
         """Handle printer registration with marketplace"""
         try:
-            # Extract registration data from request
+            # Extract registration data from request body
             reg_data = await web_request.get_json_data()
+            user_token = reg_data.get('user_token')
             printer_name = reg_data.get('printer_name')
+            manufacturer = reg_data.get('manufacturer')
+            model = reg_data.get('model')
+
+            if not user_token:
+                raise web_request.error("Missing user_token in request body", 400)
             
             if not printer_name:
-                raise web_request.error(
-                    "Missing printer name", 400)
+                raise web_request.error("Missing printer_name in request body", 400)
             
-            if not self.user_token:
-                raise web_request.error(
-                    "User must login first", 401)
-            
-            result = await self.register_printer(self.user_token, printer_name)
+            # Call the core registration logic with the extracted data
+            result = await self.register_printer(user_token, printer_name, manufacturer, model)
             return result
         except Exception as e:
-            logging.error(f"Error during printer registration handler: {str(e)}")
-            raise web_request.error(f"Registration error: {str(e)}", 500)
+            logging.exception(f"Error during printer registration handler: {str(e)}")
+            raise web_request.error(f"Registration failed: {str(e)}", 500)
     
     async def _handle_manual_register(self, web_request):
         """Handle manual printer registration with the LMNT Marketplace"""
@@ -1194,19 +1157,7 @@ class AuthManager:
             raise web_request.error(
                 f"Registration error: {str(e)}", 500)
     
-    async def _handle_refresh_token(self, web_request):
-        """Handle manual token refresh request"""
-        success = await self.refresh_printer_token()
-        
-        if success:
-            return {
-                "status": "success",
-                "printer_id": self.printer_id,
-                "expiry": self.token_expiry.isoformat() if self.token_expiry else None
-            }
-        else:
-            raise web_request.error(
-                "Failed to refresh printer token", 500)
+
     
     def get_status(self):
         """
