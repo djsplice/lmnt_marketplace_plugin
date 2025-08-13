@@ -2,6 +2,13 @@
 
 A plugin system that enables secure handling of encrypted G-code files for Klipper-based 3D printers, integrating with Moonraker for web-based control and the LMNT Marketplace for secure printer token management.
 
+## Recent Updates
+
+**2025/08/12**
+- **End-to-End Print Workflow**: Completed integration with marketplace frontend and API for seamless printing experience
+- **Authentication Stability**: Ensured reliable printer authentication with marketplace API through proper JWT validation
+- **Print Job Selection**: Added compatibility with PrintJobModal component in marketplace frontend
+
 ## Installation
 
 1.  **SSH into your printer** and clone the repository:
@@ -19,8 +26,8 @@ A plugin system that enables secure handling of encrypted G-code files for Klipp
 3.  **Configure `moonraker.conf`** by adding:
     ```ini
     [lmnt_marketplace_plugin]
-    marketplace_url: http://192.168.1.215:8088
-    cws_url: http://192.168.1.215:8080
+    marketplace_url: https://192.168.1.215:8088
+    cws_url: https://192.168.1.215:8080
     [encrypted_print]
     ```
 
@@ -108,6 +115,47 @@ cws_url: https://cws.lmnt.market
 - `cws_url`: Override the default CWS API URL (default: https://cws.lmnt.market)
 
 **Note:** The system will automatically attempt to open G-code files as encrypted first; if that fails, it falls back to standard plaintext mode. This ensures a seamless experience regardless of file type.
+
+## Using HTTPS locally (mkcert + LAN)
+
+To use the Marketplace API over HTTPS from a printer on your LAN:
+
+- **Generate dev certs with SANs** using mkcert so the cert covers your LAN IP/hostnames (e.g., `192.168.1.215`, `api.local`).
+- **Run the Marketplace API** on `https://0.0.0.0:8088` using that cert/key (see `lmnt_marketplace_apis/server.js`).
+- **Install the mkcert Root CA on the printer** so aiohttp can validate TLS:
+
+```bash
+scp ~/.local/share/mkcert/rootCA.pem <printer>:/home/<user>/rootCA.pem
+sudo cp ~/rootCA.pem /usr/local/share/ca-certificates/mkcert_root.crt
+sudo update-ca-certificates
+```
+
+- Optional: map a hostname on the printer for cleaner URLs:
+
+```bash
+echo "<LAN-IP> api.local" | sudo tee -a /etc/hosts
+```
+
+- **Update Moonraker config** on the printer:
+
+```ini
+[lmnt_marketplace_plugin]
+marketplace_url: https://<LAN-IP>:8088
+# or, if you added hosts mapping and your cert SANs include api.local
+# marketplace_url: https://api.local:8088
+
+# Optional if used by your setup
+cws_url: https://<LAN-IP>:8080
+```
+
+Restart Moonraker:
+
+```bash
+sudo systemctl restart moonraker
+```
+
+Verify in `~/printer_data/logs/moonraker.log` that polling hits
+`/api/printers/poll-print-queue` over HTTPS without TLS errors.
 
 ## Secure Print Workflow
 

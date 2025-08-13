@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.1] - 2025-08-12
+
+### Enhanced
+- **End-to-End Print Workflow**: Completed integration with marketplace frontend and API for seamless print workflow
+- **Authentication Stability**: Ensured reliable printer authentication with marketplace API through proper JWT validation
+- **Print Job Selection**: Improved compatibility with PrintJobModal component in marketplace frontend
+
+### Fixed
+- **Token Validation**: Resolved edge cases in printer token validation to ensure consistent authentication
+- **Error Handling**: Enhanced error reporting and recovery during print job processing
+
 ## [1.3.0] - 2025-07-31
 
 ### Security
