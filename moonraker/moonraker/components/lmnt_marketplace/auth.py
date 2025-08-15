@@ -224,64 +224,61 @@ class AuthManager:
         # Also check for legacy format
         hex_key_filename = "printer_dlt_private_key.hex"
         hex_key_file_path = os.path.join(self.integration.tokens_path, hex_key_filename)
+        # Some versions wrote a cleartext file with a different suffix; support migrating it
+        hex_clear_key_filename = "printer_dlt_private_key.hex.clear"
+        hex_clear_key_file_path = os.path.join(self.integration.tokens_path, hex_clear_key_filename)
         
-        logging.info(f"LMNT AUTH DLT: Looking for DLT private key file at {enc_key_file_path} or {hex_key_file_path}")
+        logging.info(
+            f"LMNT AUTH DLT: Looking for DLT private key file at {enc_key_file_path} or {hex_key_file_path} (.hex.clear also supported)"
+        )
 
         # Try encrypted format first
         if os.path.exists(enc_key_file_path):
             try:
                 with open(enc_key_file_path, 'r') as f:
                     key_data = f.read().strip()
-                
                 if key_data:
-                    # New encrypted format
                     logging.info("LMNT AUTH DLT: Loading encrypted private key")
                     decrypted_private_key = self._decrypt_private_key(key_data)
                     if decrypted_private_key:
                         self.dlt_private_key = PrivateKey(decrypted_private_key, encoder=HexEncoder)
                         logging.info("LMNT AUTH DLT: Successfully loaded encrypted DLT private key.")
-                        # Optionally log public key for verification if in debug mode
                         if self.integration.debug_mode:
                             public_key_b64 = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
                             logging.debug(f"LMNT AUTH DLT: Loaded public key (b64): {public_key_b64[:10]}...")
                         return True
                     else:
-                        logging.error("LMNT AUTH DLT: Failed to decrypt DLT private key")
-                        # Could be hardware change - fall through to check legacy format
+                        logging.error("LMNT AUTH DLT: Failed to decrypt DLT private key; will check for legacy formats.")
                 else:
                     logging.warning(f"LMNT AUTH DLT: DLT private key file {enc_key_file_path} is empty.")
             except Exception as e:
                 logging.error(f"LMNT AUTH DLT: Error loading encrypted DLT private key from {enc_key_file_path}: {str(e)}")
-        
-        # Try legacy plaintext format
+
+        # Try legacy plaintext format (support both .hex and .hex.clear)
+        legacy_key_path = None
         if os.path.exists(hex_key_file_path):
+            legacy_key_path = hex_key_file_path
+        elif os.path.exists(hex_clear_key_file_path):
+            legacy_key_path = hex_clear_key_file_path
+
+        if legacy_key_path:
             try:
-                with open(hex_key_file_path, 'r') as f:
+                with open(legacy_key_path, 'r') as f:
                     key_data = f.read().strip()
-                
                 if key_data:
-                    # Legacy plaintext format - migrate to encrypted
-                    logging.info("LMNT AUTH DLT: Migrating plaintext private key to encrypted format")
-                    
-                    # Load the key first to verify it's valid
+                    logging.info(f"LMNT AUTH DLT: Migrating plaintext private key from {legacy_key_path} to encrypted format")
                     try:
                         self.dlt_private_key = PrivateKey(key_data, encoder=HexEncoder)
                     except Exception as e:
-                        logging.error(f"LMNT AUTH DLT: Invalid plaintext private key: {e}")
+                        logging.error(f"LMNT AUTH DLT: Invalid plaintext private key in {legacy_key_path}: {e}")
                         return False
-                    
-                    # Encrypt and save the key
                     if self._save_dlt_private_key_to_disk(key_data):
                         logging.info("LMNT AUTH DLT: Successfully migrated to encrypted private key")
-                        
-                        # Remove old plaintext file
                         try:
-                            os.remove(hex_key_file_path)
-                            logging.info("LMNT AUTH DLT: Removed old plaintext key file")
+                            os.remove(legacy_key_path)
+                            logging.info(f"LMNT AUTH DLT: Removed old plaintext key file {legacy_key_path}")
                         except Exception as e:
-                            logging.warning(f"LMNT AUTH DLT: Could not remove old plaintext key file: {e}")
-                        
-                        # Optionally log public key for verification if in debug mode
+                            logging.warning(f"LMNT AUTH DLT: Could not remove old plaintext key file {legacy_key_path}: {e}")
                         if self.integration.debug_mode:
                             public_key_b64 = self.dlt_private_key.public_key.encode(encoder=Base64Encoder).decode('utf-8')
                             logging.debug(f"LMNT AUTH DLT: Loaded public key (b64): {public_key_b64[:10]}...")
@@ -290,11 +287,11 @@ class AuthManager:
                         logging.error("LMNT AUTH DLT: Failed to migrate private key to encrypted format")
                         return False
                 else:
-                    logging.warning(f"LMNT AUTH DLT: Legacy DLT private key file {hex_key_file_path} is empty.")
+                    logging.warning(f"LMNT AUTH DLT: Legacy DLT private key file {legacy_key_path} is empty.")
             except Exception as e:
-                logging.error(f"LMNT AUTH DLT: Error loading legacy DLT private key from {hex_key_file_path}: {str(e)}")
-                
-        logging.warning(f"LMNT AUTH DLT: DLT private key not found. Will need to generate a new one.")
+                logging.error(f"LMNT AUTH DLT: Error loading legacy DLT private key from {legacy_key_path}: {str(e)}")
+
+        logging.warning("LMNT AUTH DLT: DLT private key not found. Will need to generate a new one.")
         return False
 
     def _save_dlt_private_key_to_disk(self, private_key_hex_str):
@@ -315,6 +312,14 @@ class AuthManager:
                 logging.error("LMNT AUTH DLT: Failed to encrypt DLT private key")
                 return False
             
+            # Best-effort: remove any existing encrypted key before writing new one
+            try:
+                if os.path.exists(dlt_key_file_path):
+                    os.remove(dlt_key_file_path)
+                    logging.info(f"LMNT AUTH DLT: Overwriting existing encrypted key at {dlt_key_file_path}")
+            except Exception as e:
+                logging.warning(f"LMNT AUTH DLT: Could not remove existing encrypted key before overwrite: {e}")
+
             # Write encrypted key to file
             with open(dlt_key_file_path, 'w') as f:
                 f.write(encrypted_private_key)
@@ -325,6 +330,18 @@ class AuthManager:
             except Exception as e:
                 logging.warning(f"LMNT AUTH DLT: Could not set secure permissions on key file: {e}")
             
+            # Clean up any legacy plaintext files if they exist
+            for legacy in [
+                os.path.join(self.integration.tokens_path, "printer_dlt_private_key.hex"),
+                os.path.join(self.integration.tokens_path, "printer_dlt_private_key.hex.clear"),
+            ]:
+                try:
+                    if os.path.exists(legacy):
+                        os.remove(legacy)
+                        logging.info(f"LMNT AUTH DLT: Removed legacy plaintext key file {legacy}")
+                except Exception as e:
+                    logging.warning(f"LMNT AUTH DLT: Could not remove legacy key file {legacy}: {e}")
+
             logging.info(f"LMNT AUTH DLT: Successfully saved encrypted DLT private key to {dlt_key_file_path}")
             return True
         except Exception as e:
@@ -987,24 +1004,28 @@ class AuthManager:
             register_url = f"{self.integration.marketplace_url}/api/register-printer"
             logging.info(f"Registering printer with URL: {register_url}")
 
-            # DLT Key Pair Management
+            # DLT Key Pair Management (always generate fresh key for registration and overwrite existing files)
             printer_public_key_b64_str = None
-            if self.dlt_private_key is None:
-                logging.info("LMNT AUTH DLT: No existing DLT private key found, generating a new one.")
-                try:
-                    self.dlt_private_key = PrivateKey.generate()
-                    private_key_hex = self.dlt_private_key.encode(encoder=HexEncoder).decode('utf-8')
-                    if not self._save_dlt_private_key(private_key_hex):
-                        # Handle failure to save key, maybe raise an error or log prominently
-                        logging.error("LMNT AUTH DLT: CRITICAL - Failed to save newly generated DLT private key.")
-                        # Depending on policy, might prevent registration or proceed without DLT key
-                        pass # Or raise an exception
-                    else:
-                        logging.info("LMNT AUTH DLT: Successfully generated and saved new DLT private key.")
-                except Exception as e:
-                    logging.error(f"LMNT AUTH DLT: Error generating/saving DLT key pair: {str(e)}")
-                    # Ensure dlt_private_key is None if generation/saving fails
-                    self.dlt_private_key = None
+            logging.info("LMNT AUTH DLT: Generating fresh DLT private key for registration and overwriting existing key files if present.")
+            try:
+                self.dlt_private_key = PrivateKey.generate()
+                private_key_hex = self.dlt_private_key.encode(encoder=HexEncoder).decode('utf-8')
+                # Save (overwrites .enc and cleans legacy files)
+                if not self._save_dlt_private_key_to_disk(private_key_hex):
+                    logging.error("LMNT AUTH DLT: CRITICAL - Failed to save newly generated DLT private key.")
+                else:
+                    logging.info("LMNT AUTH DLT: Successfully generated and saved new DLT private key (overwrote existing if any).")
+            except Exception as e:
+                logging.error(f"LMNT AUTH DLT: Error generating/saving DLT key pair: {str(e)}")
+                self.dlt_private_key = None
+            
+            # Immediately update CryptoManager with the new key so prints can decrypt without restart
+            try:
+                if self.dlt_private_key and hasattr(self.integration, 'crypto_manager'):
+                    self.integration.crypto_manager.dlt_private_key_ed25519 = self.dlt_private_key
+                    logging.info("LMNT AUTH DLT: Updated CryptoManager with new DLT private key.")
+            except Exception as e:
+                logging.warning(f"LMNT AUTH DLT: Could not update CryptoManager with new key: {e}")
             
             if self.dlt_private_key:
                 try:
@@ -1052,8 +1073,9 @@ class AuthManager:
                     logging.info(f"Registration response body: {redacted_response}")
                     
                     if response.status != 200 and response.status != 201:
-                        logging.error(f"Printer registration failed: {response_text}")
-                        raise self.integration.server.error(f"Registration failed: {response_text}", response.status)
+                        # Log full body, but raise with a short, header-safe reason
+                        logging.error(f"Printer registration failed (status {response.status}): {response_text}")
+                        raise self.integration.server.error("Registration failed", response.status)
                     
                     # Try to parse as JSON if possible
                     try:
@@ -1085,13 +1107,15 @@ class AuthManager:
                         return {"success": True, "message": response_text}
             except Exception as e:
                 logging.error(f"Exception during registration request: {str(e)}")
-                raise self.integration.server.error(f"Registration request error: {str(e)}", 500)
+                # Avoid including large/HTML content in the HTTP reason phrase
+                raise self.integration.server.error("Registration request error", 500)
         except aiohttp.ClientError as e:
             logging.error(f"HTTP error during printer registration: {str(e)}")
             raise self.integration.server.error(f"Connection error: {str(e)}", 500)
         except Exception as e:
             logging.error(f"Error during printer registration: {str(e)}")
-            raise self.integration.server.error(f"Registration error: {str(e)}", 500)
+            # Avoid propagating long bodies into the reason
+            raise self.integration.server.error("Registration error", 500)
             
     async def _handle_register_printer(self, web_request):
         """Handle printer registration with marketplace"""
@@ -1245,13 +1269,9 @@ class AuthManager:
                 pass
             
             # Boot ID (changes on reboot, but provides additional entropy)
-            try:
-                with open('/proc/sys/kernel/random/boot_id', 'r') as f:
-                    boot_id = f.read().strip()
-                    # Use only part of boot_id to avoid issues with reboots
-                    fingerprint_data.append(boot_id[:8])
-            except:
-                pass
+            # NOTE: Removed boot_id from fingerprint as it changes on every reboot,
+            # which made the derived encryption key unstable and prevented
+            # decryption of the stored private key after restarts.
             
             # Fallback to hostname if nothing else available
             if not fingerprint_data:
