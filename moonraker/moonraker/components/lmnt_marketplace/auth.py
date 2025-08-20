@@ -26,7 +26,7 @@ import jwt
 
 # PyNaCl for ED25519 key operations
 import nacl.utils
-from nacl.public import PrivateKey
+from nacl.public import PrivateKey, PublicKey, Box
 from nacl.encoding import HexEncoder, Base64Encoder
 
 class AuthManager:
@@ -101,6 +101,12 @@ class AuthManager:
             self.http_client = aiohttp.ClientSession()
             self._owns_http_client = True  # We own this client
             logging.info("Created HTTP client for AuthManager")
+
+        # Ensure a DLT keypair exists (X25519 for encryption compatibility)
+        try:
+            self._ensure_dlt_keypair()
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Failed to ensure DLT keypair: {e}")
     
     def register_endpoints(self, register_endpoint):
         """Register HTTP endpoints for authentication"""
@@ -293,6 +299,179 @@ class AuthManager:
 
         logging.warning("LMNT AUTH DLT: DLT private key not found. Will need to generate a new one.")
         return False
+
+    def _ensure_dlt_keypair(self):
+        """
+        Ensure an X25519 keypair exists. If not present on disk, generate and save it
+        in the existing encrypted format to maintain compatibility.
+        """
+        if self.dlt_private_key is not None:
+            return True
+        try:
+            # Generate X25519 private key (used for public-key encryption via NaCl box)
+            self.dlt_private_key = PrivateKey.generate()
+            # Persist in encrypted form using existing helper
+            # Store hex-encoded private key to align with legacy storage expectations
+            priv_hex = self.dlt_private_key.encode(encoder=HexEncoder).decode("utf-8")
+            if not self._save_dlt_private_key_to_disk(priv_hex):
+                logging.error("LMNT AUTH DLT: Failed to save generated DLT keypair to disk")
+                return False
+            logging.info("LMNT AUTH DLT: Generated and saved new X25519 keypair")
+            return True
+        except Exception as e:
+            logging.error(f"LMNT AUTH DLT: Error generating DLT keypair: {e}")
+            return False
+
+    def get_public_key_b64(self):
+        """Return Base64-encoded X25519 public key suitable for transport."""
+        if not self.dlt_private_key:
+            return None
+        try:
+            pub_bytes = bytes(self.dlt_private_key.public_key)
+            return base64.b64encode(pub_bytes).decode("utf-8")
+        except Exception as e:
+            logging.error(f"LMNT AUTH DLT: Error encoding public key: {e}")
+            return None
+
+    def get_key_fingerprint(self):
+        """Return SHA-256 hex fingerprint of the raw public key bytes."""
+        if not self.dlt_private_key:
+            return None
+        try:
+            pub_bytes = bytes(self.dlt_private_key.public_key)
+            return hashlib.sha256(pub_bytes).hexdigest()
+        except Exception as e:
+            logging.error(f"LMNT AUTH DLT: Error computing key fingerprint: {e}")
+            return None
+
+    async def start_pairing(self, printer_name: str, manufacturer: str = None, model: str = None):
+        """
+        Start pairing with the marketplace by sending our public key and printer metadata.
+
+        Returns response from marketplace, typically including pairing_code, session_id, expires_at.
+        """
+        if not self.http_client:
+            raise RuntimeError("HTTP client not initialized")
+        # Ensure keypair exists
+        if not self.dlt_private_key:
+            self._ensure_dlt_keypair()
+        pub_b64 = self.get_public_key_b64()
+        key_id = self.get_key_fingerprint()
+        if not pub_b64 or not key_id:
+            raise RuntimeError("Missing key material for pairing")
+
+        payload = {
+            "public_key": pub_b64,
+            "key_type": "x25519",
+            "key_id": key_id,
+            "printer": {
+                "name": printer_name,
+                "manufacturer": manufacturer,
+                "model": model,
+            },
+        }
+        url = f"{self.integration.marketplace_url}/api/printers/pair/start"
+        logging.info(f"LMNT AUTH: Starting pairing with marketplace at {url}")
+        try:
+            async with self.http_client.post(url, json=payload) as resp:
+                data = await resp.json()
+                if resp.status >= 400:
+                    logging.error(f"LMNT AUTH: pair/start error {resp.status}: {data}")
+                    raise RuntimeError(f"pair/start failed: {resp.status}")
+                return data
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Error calling pair/start: {e}")
+            raise
+
+    async def pairing_status(self, session_id: str):
+        """Check pairing status for a session_id."""
+        if not self.http_client:
+            raise RuntimeError("HTTP client not initialized")
+        url = f"{self.integration.marketplace_url}/api/printers/pair/status"
+        try:
+            async with self.http_client.post(url, json={"session_id": session_id}) as resp:
+                data = await resp.json()
+                if resp.status >= 400:
+                    logging.error(f"LMNT AUTH: pair/status error {resp.status}: {data}")
+                    raise RuntimeError(f"pair/status failed: {resp.status}")
+                return data
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Error calling pair/status: {e}")
+            raise
+
+    async def complete_pairing(self, session_id: str):
+        """
+        Complete pairing and save the issued printer token. Supports both clear and encrypted responses.
+        """
+        if not self.http_client:
+            raise RuntimeError("HTTP client not initialized")
+        url = f"{self.integration.marketplace_url}/api/printers/pair/complete"
+        try:
+            async with self.http_client.post(url, json={"session_id": session_id}) as resp:
+                data = await resp.json()
+                if resp.status >= 400:
+                    logging.error(f"LMNT AUTH: pair/complete error {resp.status}: {data}")
+                    raise RuntimeError(f"pair/complete failed: {resp.status}")
+
+                token = None
+                expiry = None
+                printer_id = None
+
+                # Plain token path
+                if isinstance(data, dict) and data.get("token"):
+                    token = data.get("token")
+                    expiry = None
+                    # Accept both expires_at and expiry
+                    expires_at = data.get("expires_at") or data.get("expiry")
+                    try:
+                        if expires_at:
+                            expiry = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                    except Exception:
+                        expiry = None
+                    printer_id = data.get("printer_id")
+
+                # Encrypted token path: expect fields 'ciphertext' (b64), 'nonce' (b64), 'sender_pubkey' (b64)
+                elif isinstance(data, dict) and data.get("ciphertext"):
+                    if not self.dlt_private_key:
+                        raise RuntimeError("No private key to decrypt token")
+                    try:
+                        ct = base64.b64decode(data["ciphertext"])  # bytes including auth tag
+                        nonce = base64.b64decode(data.get("nonce", "")) if data.get("nonce") else None
+                        spk_b64 = data.get("sender_pubkey")
+                        if not spk_b64:
+                            raise RuntimeError("Missing sender_pubkey for decryption")
+                        spk = PublicKey(base64.b64decode(spk_b64))
+                        box = Box(self.dlt_private_key, spk)
+                        if nonce is None:
+                            # If nonce not provided, assume crypto_box_seal style not supported here
+                            raise RuntimeError("Missing nonce for NaCl box decryption")
+                        plaintext = box.decrypt(ct, nonce)
+                        # Expect plaintext to be utf-8 JSON with token + expiry
+                        try:
+                            payload = json.loads(plaintext.decode('utf-8'))
+                        except Exception:
+                            payload = {"token": plaintext.decode('utf-8', errors='ignore')}
+                        token = payload.get("token")
+                        printer_id = payload.get("printer_id") or data.get("printer_id")
+                        expires_at = payload.get("expires_at") or payload.get("expiry") or data.get("expires_at")
+                        try:
+                            if expires_at:
+                                expiry = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+                        except Exception:
+                            expiry = None
+                    except Exception as e:
+                        logging.error(f"LMNT AUTH: Error decrypting encrypted token: {e}")
+                        raise
+
+                if not token:
+                    raise RuntimeError("pair/complete did not return a token")
+
+                # Save token
+                self.save_printer_token(token, expiry, printer_id=printer_id)
+                return {"status": "success", "printer_id": self.printer_id, "expiry": expiry.isoformat() if expiry else None}
+        except Exception as e:
+            logging.error(f"LMNT AUTH: Error calling pair/complete: {e}")
+            raise
 
     def _save_dlt_private_key_to_disk(self, private_key_hex_str):
         """
@@ -537,17 +716,18 @@ class AuthManager:
             
         logging.info(f"LMNT AUTH: Token decoded successfully, available claims: {list(payload.keys())}")
         
-        # Check for both camelCase and snake_case variations of printer ID
-        printer_id = payload.get('printer_id') or payload.get('printerId')
+        # Check for both camelCase and snake_case variations of printer ID, then fallback to 'sub'
+        printer_id = payload.get('printer_id') or payload.get('printerId') or payload.get('sub')
         
         if printer_id:
             logging.info(f"LMNT AUTH: Successfully extracted printer ID from token: {printer_id}")
         else:
-            logging.error("LMNT AUTH: Token does not contain a printer_id or printerId claim")
+            logging.error("LMNT AUTH: Token does not contain a printer_id/printerId claim; attempting to use 'sub' if present")
             logging.error(f"LMNT AUTH: Available claims in token: {list(payload.keys())}")
             # Log the actual values to help debug
             logging.error(f"LMNT AUTH: printer_id value: {payload.get('printer_id')}")
             logging.error(f"LMNT AUTH: printerId value: {payload.get('printerId')}")
+            logging.error(f"LMNT AUTH: sub value: {payload.get('sub')}")
             if self.integration.debug_mode:
                 logging.debug(f"LMNT AUTH: Full token payload: {payload}")
         
@@ -572,11 +752,16 @@ class AuthManager:
         if not payload:
             return False
             
-        # Check if token has an expiry and if it's in the future
+        # Check if token has an expiry and if it's in the future (timezone-safe)
         jwt_expiry = self._get_token_expiry_from_jwt(token_to_check)
         if jwt_expiry:
-            now = datetime.now()
-            if jwt_expiry <= now:
+            now = self._get_timezone_aware_now()
+            cmp = self._safe_datetime_comparison(jwt_expiry, now)
+            if cmp is None:
+                # Fallback: consider invalid if we cannot compare
+                logging.warning("LMNT AUTH: Could not compare token expiry safely; treating as invalid")
+                return False
+            if cmp <= 0:
                 logging.warning(f"LMNT AUTH: Token has expired at {jwt_expiry}")
                 return False
                 
@@ -620,8 +805,16 @@ class AuthManager:
         jwt_expiry = self._get_token_expiry_from_jwt(token_to_check)
         if jwt_expiry:
             status["expiry"] = jwt_expiry
-            now = datetime.now()
-            time_remaining = jwt_expiry - now
+            now = self._get_timezone_aware_now()
+            # Compute time_remaining safely in UTC
+            try:
+                from datetime import timezone
+                jwt_expiry_utc = jwt_expiry.astimezone(timezone.utc) if jwt_expiry.tzinfo else jwt_expiry.replace(tzinfo=timezone.utc)
+                now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
+                time_remaining = jwt_expiry_utc - now_utc
+            except Exception as e:
+                logging.error(f"LMNT AUTH: Error computing time_remaining: {e}")
+                time_remaining = timedelta(0)
             status["time_remaining"] = time_remaining
             status["expired"] = time_remaining <= timedelta(0)
             
@@ -700,8 +893,17 @@ class AuthManager:
         time_since_creation = None
         
         if hasattr(self, 'token_created_at') and self.token_created_at:
-            token_lifetime = self.token_expiry - self.token_created_at
-            time_since_creation = now - self.token_created_at
+            # Normalize creation time to aware UTC for arithmetic
+            from datetime import timezone
+            created_at = self.token_created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            exp = self.token_expiry
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            now_norm = now.astimezone(timezone.utc)
+            token_lifetime = exp - created_at
+            time_since_creation = now_norm - created_at
             
             # Log token age information
             days_since_creation = time_since_creation.total_seconds() / (24 * 60 * 60)
@@ -841,65 +1043,66 @@ class AuthManager:
         try:
             logging.info("LMNT AUTH: Attempting to refresh printer token...")
             
-            # Prepare the refresh request
-            refresh_url = f"{self.integration.marketplace_api_url}/api/printers/refresh-printer-token"
+            # Prepare the refresh request (use marketplace_url)
+            refresh_url = f"{self.integration.marketplace_url}/api/printers/refresh-printer-token"
             headers = {
                 'Authorization': f'Bearer {self.printer_token}',
                 'Content-Type': 'application/json'
             }
-            
-            # Make the refresh request
-            response = await self.http_client.post(
+
+            # Make the refresh request with aiohttp
+            async with self.http_client.post(
                 refresh_url,
                 headers=headers,
-                data=json.dumps({}),  # Empty body for POST request
+                json={},  # Empty JSON body
                 timeout=30
-            )
+            ) as resp:
+                if resp.status == 200:
+                    refresh_data = await resp.json()
+
+                    # Extract the new token and expiry from the response
+                    new_token = refresh_data.get('printer_token')
+                    token_expires_str = refresh_data.get('token_expires')
+
+                    if not new_token or not token_expires_str:
+                        logging.error("LMNT AUTH: Refresh response missing required fields")
+                        return False
+
+                    # Parse the expiry date
+                    try:
+                        new_expiry = datetime.fromisoformat(token_expires_str.replace('Z', '+00:00'))
+                    except ValueError as e:
+                        logging.error(f"LMNT AUTH: Failed to parse token expiry: {e}")
+                        return False
+
+                    # Update stored token information
+                    self.printer_token = new_token
+                    self.token_expiry = new_expiry
+                    self.token_created_at = datetime.now(timezone.utc)
+
+                    # Save the new token to disk
+                    self.save_printer_token(new_token, new_expiry)
+
+                    logging.info(f"LMNT AUTH: Successfully refreshed printer token, expires: {new_expiry.isoformat()}")
+
+                    # Schedule the next refresh check
+                    self.check_token_refresh()
+                    return True
+
+                elif resp.status == 401:
+                    logging.warning("LMNT AUTH: Token refresh failed - token is invalid or expired")
+                    # Handle expired token
+                    await self._handle_expired_token()
+                    return False
+
+                else:
+                    try:
+                        error_text = await resp.text()
+                    except Exception:
+                        error_text = "<no body>"
+                    logging.error(f"LMNT AUTH: Token refresh failed with status {resp.status}: {error_text}")
+                    return False
             
-            if response.status_code == 200:
-                refresh_data = response.json()
-                
-                # Extract the new token and expiry from the response
-                new_token = refresh_data.get('printer_token')
-                token_expires_str = refresh_data.get('token_expires')
-                
-                if not new_token or not token_expires_str:
-                    logging.error("LMNT AUTH: Refresh response missing required fields")
-                    return False
-                
-                # Parse the expiry date
-                try:
-                    new_expiry = datetime.fromisoformat(token_expires_str.replace('Z', '+00:00'))
-                except ValueError as e:
-                    logging.error(f"LMNT AUTH: Failed to parse token expiry: {e}")
-                    return False
-                
-                # Update our stored token information
-                old_token = self.printer_token
-                self.printer_token = new_token
-                self.token_expiry = new_expiry
-                self.token_created_at = datetime.now(timezone.utc)
-                
-                # Save the new token to disk
-                self.save_printer_token(new_token, new_expiry)
-                
-                logging.info(f"LMNT AUTH: Successfully refreshed printer token, expires: {new_expiry.isoformat()}")
-                
-                # Schedule the next refresh check
-                self.check_token_refresh()
-                
-                return True
-                
-            elif response.status_code == 401:
-                logging.warning("LMNT AUTH: Token refresh failed - token is invalid or expired")
-                # Handle expired token
-                await self._handle_expired_token()
-                return False
-                
-            else:
-                logging.error(f"LMNT AUTH: Token refresh failed with status {response.status_code}: {response.text}")
-                return False
-                
         except Exception as e:
             logging.error(f"LMNT AUTH: Exception during token refresh: {e}")
             return False
@@ -1191,9 +1394,11 @@ class AuthManager:
             dict: Authentication status information
         """
         return {
-            "authenticated": self.printer_token is not None,
+            "authenticated": (self.printer_token is not None) or (self.printer_id is not None),
             "printer_id": self.printer_id,
-            "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None
+            "printer_name": self.printer_name,
+            "token_expiry": self.token_expiry.isoformat() if self.token_expiry else None,
+            "token_created_at": self.token_created_at.isoformat() if self.token_created_at else None,
         }
         
     async def handle_klippy_shutdown(self):

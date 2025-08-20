@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.2] - 2025-08-20
+
+### Added
+- Local pairing and status UI at `/machine/lmnt_marketplace/ui`:
+  - Copy button for Printer ID
+  - Human-friendly token expiry with ISO timestamp
+  - Auto-refreshing status and optimistic update after pairing
+- Lightweight in-memory rate limiting on pairing endpoints (`pair/start`, `pair/status`, `pair/complete`).
+
+### Fixed
+- Resolved embedded HTML/JS quoting in `lmnt_marketplace_plugin.py` to eliminate syntax errors.
+
 ## [1.3.1] - 2025-08-12
 
 ### Enhanced
