@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LMNT Marketplace - Printer Setup</title>
+  <link rel="stylesheet" href="/machine/lmnt_marketplace/ui/styles.css">
+</head>
+<body>
+  <div id="fireworks"></div>
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo-group">
+        <a href="{{ market_url }}" class="logo-link" target="_blank">
+          <!-- SVG Logo will be injected here by the final implementation -->
+          <img src="/machine/lmnt_marketplace/ui/lmnt-logo-v2.svg" alt="LMNT Logo" class="logo-svg">
+        </a>
+      </div>
+      <nav class="nav">
+        <a href="{{ market_url }}" class="nav-item" target="_blank">Marketplace</a>
+        <a href="https://docs.lmnt.com" class="nav-item" target="_blank">About</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="container">
+    <h1 class="page-title">Printer Setup</h1>
+    <p class="page-subtitle">Connect your 3D printer to the LMNT Marketplace for secure, encrypted model printing.</p>
+
+    <div class="card">
+      <h2 class="card-title">Status</h2>
+      <div id="status">
+        <div class="status-card-body">
+          <div class="status-summary status-warning">
+            <div class="status-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5"></path><path d="M12 17h.01"></path><path d="M10.3 3.86 2.38 18a2 2 0 0 0 1.74 3h15.76a2 2 0 0 0 1.74-3l-7.92-14.14a2 2 0 0 0-3.4 0z"></path></svg></div>
+            <div>
+              <div class="status-summary-label">Status</div>
+              <div class="status-summary-value">Loading...</div>
+              <div class="status-summary-subtle">Fetching initial status from your printer.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card pairing-card" id="pairingCard" data-open="true">
+      <button class="drawer-toggle" id="pairingDrawerToggle" aria-expanded="true">
+        <div class="drawer-text">
+          <h2 class="card-title">Pairing</h2>
+          <p class="muted">To begin, give your printer a name and confirm its details. Then, press “Start Pairing” to generate a unique code.</p>
+        </div>
+        <span class="drawer-icon" aria-hidden="true"></span>
+      </button>
+      <div class="drawer-content open" id="pairingDrawerContent">
+        <div class="row">
+          <div class="card-section">
+            <label for="printerName">Printer Name</label>
+            <input type="text" id="printerName" value="{{ printer_name }}" placeholder="My Awesome Printer">
+          </div>
+          <div class="card-section">
+            <label for="manufacturer">Manufacturer</label>
+            <input type="text" id="manufacturer" value="LMNT" placeholder="Prusa, Creality, etc.">
+          </div>
+          <div class="card-section">
+            <label for="model">Model</label>
+            <input type="text" id="model" placeholder="MK4, Ender 3, etc.">
+          </div>
+        </div>
+        <div class="card-section card-actions">
+          <button id="startBtn">Start Pairing</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="pairInfoSection" style="display:none;">
+      <div id="pairingDisplay" style="display:none;">
+        <div class="pairing-display">
+          <div class="pairing-title">Enter this code on the LMNT Marketplace website</div>
+          <div class="pairing-code-display">
+            <div class="pairing-code-label">Your Pairing Code</div>
+            <div id="pairCodeValue" class="pairing-code-value">- - -</div>
+            <button id="copyCodeBtn" class="copy-code-btn" style="display:none;">Copy Code</button>
+          </div>
+          <div class="pairing-instructions">
+            1. Visit <strong id="pairingUrl">{{ market_url }}/profile</strong> in your browser.<br>
+            2. Find the "Register New Printer" section.<br>
+            3. Enter the code above to complete the pairing.
+          </div>
+        </div>
+      </div>
+      <div id="pairInfo"></div>
+      <pre id="pairJson" style="display:none;"></pre>
+    </div>
+
+  </div>
+
+  <footer class="footer">
+    <div id="pluginVersion"></div>
+  </footer>
+
+  <script>
+    // Injected configuration from Python backend
+    window.LMNT_CONFIG = {
+      marketUrl: "{{ market_url }}"
+    };
+  </script>
+  <script src="/machine/lmnt_marketplace/ui/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,332 @@
+"""
+LMNT Marketplace Crypto Module
+
+Handles encryption and decryption operations for LMNT Marketplace integration:
+- PSEK (Printer-Specific Encryption Key) management
+- Secure decryption of encrypted GCode files
+- Integration with Custodial Wallet Service (CWS) for key management
+"""
+
+import os
+import json
+import logging
+import asyncio
+import aiohttp
+import binascii
+import base64
+import time
+from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.backends import default_backend
+import nacl.secret
+import nacl.utils
+import nacl.public # For nacl.public.Box
+from nacl.public import PrivateKey as Curve25519PrivateKey, PublicKey as Curve25519PublicKey
+from nacl.signing import SigningKey as Ed25519SigningKey # To load the stored Ed25519 private key
+
+class CryptoManager:
+    """
+    Manages cryptographic operations for LMNT Marketplace
+    
+    Handles secure key management, decryption of encrypted GCode files,
+    and integration with the Custodial Wallet Service (CWS).
+    """
+    
+    def __init__(self, integration):
+        """Initialize the Crypto Manager"""
+        self.integration = integration
+        self.dlt_private_key_ed25519 = None
+        self.is_dlt_private_key_loaded = False
+    
+    async def initialize(self, klippy_apis, http_client):
+        """Initialize with Klippy APIs and HTTP client"""
+        self.klippy_apis = klippy_apis
+        self.http_client = http_client
+    
+    async def decrypt_dek(self, encrypted_gcode_dek_package):
+        """Async wrapper to decrypt the G-code DEK without blocking the event loop.
+
+        Offloads the heavy asymmetric crypto work to a background thread via
+       
+        asyncio.to_thread, while preserving the existing async API and
+        behaviour.
+        """
+        return await asyncio.to_thread(self._decrypt_dek_sync, encrypted_gcode_dek_package)
+
+    def _decrypt_dek_sync(self, encrypted_gcode_dek_package):
+        """Synchronous implementation of DEK decryption.
+
+        This contains the original asymmetric decryption logic and is invoked
+        from decrypt_dek() using asyncio.to_thread.
+        """
+        if ':' not in encrypted_gcode_dek_package:
+            # This check distinguishes the new asymmetric format from the old (now removed) symmetric one.
+            logging.error(f"CryptoManager: DEK package format not recognized as asymmetric: {encrypted_gcode_dek_package[:30]}...")
+            return None
+
+        logging.info("CryptoManager: Asymmetrically encrypted DEK package detected, using printer-generated key path.")
+        if not self.dlt_private_key_ed25519:
+            logging.error("CryptoManager: Printer's private key not loaded. Cannot decrypt asymmetric package.")
+            return None
+
+        try:
+            parts = encrypted_gcode_dek_package.split(':')
+            if len(parts) != 3:
+                logging.error("CryptoManager: Asymmetric DEK package has incorrect format.")
+                return None
+            
+            ephemeral_pubkey_b64, nonce_b64, ciphertext_b64 = parts
+            ephemeral_pubkey_bytes = base64.b64decode(ephemeral_pubkey_b64)
+            nonce_bytes = base64.b64decode(nonce_b64)
+            ciphertext_bytes = base64.b64decode(ciphertext_b64)
+
+            if hasattr(self.dlt_private_key_ed25519, 'to_curve25519_private_key'):
+                printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519.to_curve25519_private_key()
+            elif isinstance(self.dlt_private_key_ed25519, Curve25519PrivateKey):
+                logging.warning("CryptoManager: dlt_private_key_ed25519 was a Curve25519PrivateKey. Using directly.")
+                printer_dlt_private_key_curve25519 = self.dlt_private_key_ed25519
+            else:
+                logging.error(f"CryptoManager: Printer's private key is of unexpected type {type(self.dlt_private_key_ed25519)}. Cannot proceed with asymmetric decryption.")
+                return None
+            webslicer_ephemeral_public_key_curve25519 = Curve25519PublicKey(ephemeral_pubkey_bytes)
+            
+            box = nacl.public.Box(printer_dlt_private_key_curve25519, webslicer_ephemeral_public_key_curve25519)
+            
+            plaintext_dek_bytes = box.decrypt(ciphertext_bytes, nonce_bytes)
+            logging.info("CryptoManager: Successfully decrypted G-code DEK using printer's private key.")
+            return plaintext_dek_bytes
+
+        except (binascii.Error, nacl.exceptions.CryptoError) as e:
+            logging.error(f"CryptoManager: Asymmetric DEK decryption failed: {e}.")
+            return None
+
+    async def decrypt_gcode(self, encrypted_data, job_id=None, dek=None, iv=None):
+        """
+        Decrypt GCode data using a provided DEK and IV.
+        """
+        job_info = f" for job {job_id}" if job_id else ""
+        if not dek or not iv:
+            logging.error(f"DEK or IV not provided for G-code decryption{job_info}.")
+            return None
+
+        try:
+            iv_bytes = bytes.fromhex(iv)
+            # DEK is already passed as bytes from decrypt_gcode_file_from_job_details
+            dek_bytes = dek
+
+            cipher = Cipher(algorithms.AES(dek_bytes), modes.CBC(iv_bytes), backend=default_backend())
+            decryptor = cipher.decryptor()
+            decrypted_padded = decryptor.update(encrypted_data) + decryptor.finalize()
+
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+            decrypted_data = unpadder.update(decrypted_padded) + unpadder.finalize()
+            
+            logging.info(f"Successfully decrypted G-code content{job_info}.")
+            return decrypted_data
+
+        except (binascii.Error, ValueError) as e:
+            logging.error(f"Failed to decrypt G-code content{job_info}: {e}")
+            return None
+
+    async def decrypt_gcode_to_memory(self, encrypted_filepath, dek, iv, job_id=None):
+        """
+        Decrypt GCode file content to memory using provided DEK and IV, storing in a memfd file.
+        
+        Args:
+            encrypted_filepath (str): Path to the encrypted GCode file
+            dek (bytes): Data Encryption Key for decryption
+            iv (str): Initialization Vector in hex format
+            job_id (str, optional): Job ID for tracking and logging
+        
+        Returns:
+            int: File descriptor of the memfd file containing decrypted data
+            None: If decryption fails
+        """
+        import os
+        job_info = f" for job {job_id}" if job_id else ""
+        
+        if not dek or not iv:
+            logging.error(f"DEK or IV not provided for G-code decryption to memory{job_info}.")
+            return None
+        
+        try:
+            iv_bytes = bytes.fromhex(iv)
+            dek_bytes = dek
+            
+            # Create a memfd file for in-memory storage
+            memfd = os.memfd_create(f"gcode_{job_id or 'temp'}", 0)
+            logging.info(f"Created memfd for in-memory decryption{job_info}")
+            
+            # Read encrypted file content
+            with open(encrypted_filepath, 'rb') as f:
+                encrypted_data = f.read()
+            
+            cipher = Cipher(algorithms.AES(dek_bytes), modes.CBC(iv_bytes), backend=default_backend())
+            decryptor = cipher.decryptor()
+            
+            # Decrypt in chunks and write to memfd
+            chunk_size = 8192  # 8KB chunks
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+            
+            for i in range(0, len(encrypted_data), chunk_size):
+                chunk = encrypted_data[i:i + chunk_size]
+                decrypted_padded_chunk = decryptor.update(chunk)
+                decrypted_chunk = unpadder.update(decrypted_padded_chunk)
+                if decrypted_chunk:
+                    os.write(memfd, decrypted_chunk)
+            
+            # Finalize decryption and unpadding
+            final_padded = decryptor.finalize()
+            final_decrypted = unpadder.update(final_padded) + unpadder.finalize()
+            if final_decrypted:
+                os.write(memfd, final_decrypted)
+            
+            logging.info(f"Successfully decrypted G-code content to memfd{job_info}")
+            
+            # Seek to the beginning of memfd for reading
+            os.lseek(memfd, 0, os.SEEK_SET)
+            return memfd
+        
+        except (binascii.Error, ValueError, IOError) as e:
+            logging.error(f"Failed to decrypt G-code content to memory{job_info}: {e}")
+            if 'memfd' in locals():
+                os.close(memfd)
+            return None
+
+    async def decrypt_gcode_bytes_to_memory(self, encrypted_data, dek, iv, job_id=None):
+        """Async wrapper to decrypt GCode bytes to memfd without blocking the event loop.
+
+        Offloads the synchronous AES decryption and memfd writes to a background
+        thread via asyncio.to_thread, while preserving the existing async API
+        and return values.
+        """
+        return await asyncio.to_thread(self._decrypt_gcode_bytes_to_memory_sync, encrypted_data, dek, iv, job_id)
+
+    def _decrypt_gcode_bytes_to_memory_sync(self, encrypted_data, dek, iv, job_id=None):
+        """Synchronous implementation of decrypt_gcode_bytes_to_memory.
+
+        This contains the original decryption logic and is invoked from the
+        async decrypt_gcode_bytes_to_memory() wrapper using asyncio.to_thread.
+        """
+        import os
+        job_info = f" for job {job_id}" if job_id else ""
+        
+        if not dek or not iv:
+            logging.error(f"DEK or IV not provided for G-code decryption to memory{job_info}.")
+            return None
+        
+        try:
+            dek_bytes = dek
+            iv_bytes = bytes.fromhex(iv)
+
+            # Create a memfd file for in-memory storage
+            memfd = os.memfd_create(f"gcode_{job_id or 'temp'}", 0)
+            logging.info(f"Created memfd for in-memory decryption{job_info}")
+
+            cipher = Cipher(algorithms.AES(dek_bytes), modes.CBC(iv_bytes), backend=default_backend())
+            decryptor = cipher.decryptor()
+
+            # Decrypt in chunks and write to memfd
+            chunk_size = 8192  # 8KB chunks
+            unpadder = padding.PKCS7(algorithms.AES.block_size).unpadder()
+
+            # Process all but the last block
+            decrypted_data = b''
+            for i in range(0, len(encrypted_data) - chunk_size, chunk_size):
+                chunk = encrypted_data[i:i + chunk_size]
+                decrypted_data += decryptor.update(chunk)
+
+            # Process the last chunk and finalize
+            last_chunk = encrypted_data[-(len(encrypted_data) % chunk_size) if (len(encrypted_data) % chunk_size) != 0 else chunk_size:]
+            decrypted_data += decryptor.update(last_chunk)
+            decrypted_data += decryptor.finalize()
+
+            # Unpad the entire decrypted result
+            unpadded_data = unpadder.update(decrypted_data) + unpadder.finalize()
+            os.write(memfd, unpadded_data)
+
+            logging.info(f"Successfully decrypted G-code content to memfd{job_info}")
+
+            # Seek to the beginning of memfd for reading
+            os.lseek(memfd, 0, os.SEEK_SET)
+            return memfd
+
+        except (binascii.Error, ValueError, IOError, TypeError) as e:
+            logging.exception(f"Failed to decrypt G-code content to memory{job_info}: {e}")
+            if 'memfd' in locals():
+                os.close(memfd)
+            return None
+
+    async def decrypt_gcode_file_from_job_details(self, encrypted_filepath, job_details_dict, job_id):
+        """
+        Decrypts an encrypted G-code file using details from the job dictionary.
+        """
+        gcode_dek_package = job_details_dict.get('gcode_dek_package')
+        gcode_iv_hex = job_details_dict.get('gcode_iv_hex')
+
+        if not gcode_dek_package or not gcode_iv_hex:
+            logging.error(f"CryptoManager: Missing crypto materials for job {job_id}")
+            return None
+
+        try:
+            # The printer_kek_id is no longer used as we only support the asymmetric printer-generated key path here.
+            plaintext_gcode_dek_bytes = await self.decrypt_dek(gcode_dek_package)
+            if not plaintext_gcode_dek_bytes:
+                logging.error(f"CryptoManager: Failed to obtain plaintext G-code DEK for job {job_id}")
+                return None
+
+            with open(encrypted_filepath, 'rb') as f_enc:
+                encrypted_gcode_content = f_enc.read()
+
+            decrypted_gcode_bytes = await self.decrypt_gcode(
+                encrypted_gcode_content,
+                job_id=job_id,
+                dek=plaintext_gcode_dek_bytes,
+                iv=gcode_iv_hex
+            )
+
+            if not decrypted_gcode_bytes:
+                logging.error(f"CryptoManager: Failed to decrypt G-code content for job {job_id}")
+                return None
+
+            base, ext = os.path.splitext(os.path.basename(encrypted_filepath))
+            decrypted_filename = f"{base}.decrypted{ext or '.gcode'}"
+            decrypted_filepath = os.path.join(self.integration.encrypted_path, decrypted_filename)
+            
+            with open(decrypted_filepath, 'wb') as f_dec:
+                f_dec.write(decrypted_gcode_bytes)
+            
+            logging.info(f"CryptoManager: Successfully saved decrypted G-code for job {job_id} to {decrypted_filepath}")
+            return decrypted_filepath
+
+        except Exception as e:
+            logging.error(f"CryptoManager: Error in decrypt_gcode_file_from_job_details for job {job_id}: {e}")
+            return None
+        
+    async def decrypt_with_key(self, encrypted_data, key):
+        """Decrypt data using a provided Fernet key"""
+        if not key:
+            logging.error("Decryption failed: No key provided")
+            return None
+        
+        try:
+            cipher = Fernet(key)
+            decrypted_data = cipher.decrypt(encrypted_data)
+            return decrypted_data
+        except InvalidToken:
+            logging.error("Decryption failed: Invalid token")
+            return None
+        except Exception as e:
+            logging.error(f"An unexpected error occurred during decryption: {str(e)}")
+            return None
+
+    def generate_dummy_key(self):
+        """Generates a dummy Fernet key for testing purposes"""
+        try:
+            key = Fernet.generate_key()
+            logging.info(f"Generated dummy Fernet key: {key.decode()}")
+            return key
+        except Exception as e:
+            logging.error(f"Error generating dummy key: {str(e)}")
+            return None
