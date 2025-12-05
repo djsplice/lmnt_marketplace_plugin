@@ -27,38 +27,18 @@ if [ ! -d "${COMPONENT_DIR}" ]; then
     exit 1
 fi
 
-# Create plugin directory
-echo "Creating plugin directory at ${PLUGIN_DIR}..."
-mkdir -p "${PLUGIN_DIR}/component"
-mkdir -p "${PLUGIN_DIR}/component/lmnt_marketplace"
-
-# Copy plugin files
-echo "Copying plugin files..."
-cp "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" "${PLUGIN_DIR}/component/"
-cp "${REPO_DIR}/moonraker/moonraker/components/encrypted_print.py" "${PLUGIN_DIR}/component/"
-cp "${REPO_DIR}/moonraker/moonraker/components/encrypted_provider.py" "${PLUGIN_DIR}/component/"
-
-# Copy UI files
-echo "Copying UI files..."
-if [ -d "${REPO_DIR}/moonraker/moonraker/components/ui" ]; then
-    mkdir -p "${PLUGIN_DIR}/component/ui"
-    cp -r "${REPO_DIR}/moonraker/moonraker/components/ui/"* "${PLUGIN_DIR}/component/ui/"
-fi
-
-
-# Create lmnt_marketplace directory if it doesn't exist
-mkdir -p "${PLUGIN_DIR}/component/lmnt_marketplace"
-
-# Copy all files from lmnt_marketplace directory
-cp -r "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace/"* "${PLUGIN_DIR}/component/lmnt_marketplace/" 2>/dev/null || true
-
-# Create symlinks
+# Create symlinks directly to the repo (no copying needed)
+# This ensures updates via git pull are immediately active
 echo "Creating symlinks in Moonraker components directory..."
-ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
-ln -sf "${PLUGIN_DIR}/component/lmnt_marketplace_plugin.py" "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
-ln -sf "${PLUGIN_DIR}/component/encrypted_print.py" "${COMPONENT_DIR}/encrypted_print.py"
-ln -sf "${PLUGIN_DIR}/component/encrypted_provider.py" "${COMPONENT_DIR}/encrypted_provider.py"
-ln -sf "${PLUGIN_DIR}/component/ui" "${COMPONENT_DIR}/ui"
+ln -sf "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
+ln -sf "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
+ln -sf "${REPO_DIR}/moonraker/moonraker/components/encrypted_print.py" "${COMPONENT_DIR}/encrypted_print.py"
+ln -sf "${REPO_DIR}/moonraker/moonraker/components/encrypted_provider.py" "${COMPONENT_DIR}/encrypted_provider.py"
+
+# Symlink UI files if they exist
+if [ -d "${REPO_DIR}/moonraker/moonraker/components/ui" ]; then
+    ln -sf "${REPO_DIR}/moonraker/moonraker/components/ui" "${COMPONENT_DIR}/ui"
+fi
 
 
 # Copy Klipper macros if they exist

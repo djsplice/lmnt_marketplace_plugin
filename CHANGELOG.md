@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.5] - 2025-12-04
+### Fixed
+- **CRITICAL**: Fixed install script to symlink directly to repo instead of copying files
+- This ensures updates via Moonraker's update manager are immediately active
+- Removed unnecessary intermediate copy step that prevented updates from taking effect
+
 ## [1.1.4] - 2025-12-04
 ### Added
 - Enhanced logging for print stats collection and transmission
