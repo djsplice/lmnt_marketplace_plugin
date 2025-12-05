@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.1] - 2025-12-04
+
+### Changed
+- **Update Manager**: Added `info_tags` to `install.sh` to display release notes and channel information in Mainsail/Fluidd.
+
 ## [1.1.0] - 2025-12-04
 
 ### Added
