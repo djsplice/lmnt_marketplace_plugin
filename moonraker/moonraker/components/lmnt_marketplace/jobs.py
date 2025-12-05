@@ -982,6 +982,7 @@ class JobManager:
                             'print_duration': print_duration,
                             'total_duration': total_duration
                         }
+                        logging.info(f"LMNT MONITOR: Collected stats for {job_id}: {stats}")
                         await self._update_job_status(job_id, 'completed', "Print completed successfully", stats=stats)
                         self.current_print_job = None
                         break
@@ -998,6 +999,7 @@ class JobManager:
                             'print_duration': print_duration,
                             'total_duration': total_duration
                         }
+                        logging.info(f"LMNT MONITOR: Collected stats for {job_id} (idle fallback): {stats}")
                         await self._update_job_status(job_id, 'completed', "Print completed", stats=stats)
                         self.current_print_job = None
                         break
@@ -1081,13 +1083,15 @@ class JobManager:
             
             # Add stats if provided
             if stats:
+                logging.info(f"Adding stats to payload for {job_id}: {stats}")
                 payload.update(stats)
+            else:
+                logging.warning(f"No stats provided for {job_id}")
             
             if message:
                 payload["message"] = message
             
-            if stats:
-                payload.update(stats)
+            logging.info(f"Sending job update payload for {job_id}: {payload}")
             
             async with self.http_client.post(update_url, headers=headers, json=payload) as response:
                 if response.status == 200:

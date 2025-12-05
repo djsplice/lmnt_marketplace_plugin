@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.4] - 2025-12-04
+### Added
+- Enhanced logging for print stats collection and transmission
+- Detailed payload logging for debugging
+
+### Fixed
+- Removed duplicate stats update in payload construction
+- Improved stats flow visibility for troubleshooting
+
 ## [1.1.3] - 2025-12-04
 
 ### Fixed
