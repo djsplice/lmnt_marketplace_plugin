@@ -1,6 +1,6 @@
 #!/bin/bash
 # LMNT Marketplace Plugin Installer for Moonraker
-# This script installs the LMNT Marketplace Plugin and Hedera Slicer components
+# This script installs the LMNT Marketplace Plugin
 
 set -e
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # LMNT Marketplace Plugin Uninstaller for Moonraker
-# This script removes the LMNT Marketplace Plugin and Hedera Slicer components
+# This script removes the LMNT Marketplace Plugin components
 
 set -e
 
