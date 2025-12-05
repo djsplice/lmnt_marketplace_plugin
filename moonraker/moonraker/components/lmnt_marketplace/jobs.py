@@ -1079,6 +1079,10 @@ class JobManager:
             
             payload = {"status": api_status}
             
+            # Add stats if provided
+            if stats:
+                payload.update(stats)
+            
             if message:
                 payload["message"] = message
             

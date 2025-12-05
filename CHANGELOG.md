@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.3] - 2025-12-04
+
+### Fixed
+- **Stats Reporting**: Fixed a bug where collected stats were not being included in the API payload, resulting in missing data on the server.
+
 ## [1.1.2] - 2025-12-04
 
 ### Fixed
