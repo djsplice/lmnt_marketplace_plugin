@@ -993,7 +993,12 @@ class JobManager:
                     elif state == 'idle' and last_state in ['printing', 'paused']:
                         # Print finished but we missed the complete state
                         logging.info(f"LMNT MONITOR: Print job {job_id} appears to have completed (idle after printing)")
-                        await self._update_job_status(job_id, 'completed', "Print completed")
+                        stats = {
+                            'filament_used': filament_used,
+                            'print_duration': print_duration,
+                            'total_duration': total_duration
+                        }
+                        await self._update_job_status(job_id, 'completed', "Print completed", stats=stats)
                         self.current_print_job = None
                         break
                     

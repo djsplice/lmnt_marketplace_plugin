@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.2] - 2025-12-04
+
+### Fixed
+- **Stats Collection**: Fixed missing stats collection when print job transitions directly from `printing` to `idle` (skipping `complete` state).
+
 ## [1.1.1] - 2025-12-04
 
 ### Changed
