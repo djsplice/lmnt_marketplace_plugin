@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.6] - 2025-12-04
+### Fixed
+- **CRITICAL**: Fixed API version mismatch causing 401 Unauthorized errors
+- Reverted `api_version` to `1.0.0` to match backend API endpoint
+- Added comment clarifying `api_version` is backend API version, not plugin version
+
 ## [1.1.5] - 2025-12-04
 ### Fixed
 - **CRITICAL**: Fixed install script to symlink directly to repo instead of copying files
