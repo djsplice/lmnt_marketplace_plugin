@@ -957,14 +957,15 @@ class JobManager:
                 consecutive_errors = 0  # Reset error count on success
                 print_stats = result['print_stats']
                 state = print_stats.get('state', 'unknown')
-                progress = print_stats.get('print_duration', 0)
-                total_duration = print_stats.get('total_duration', 0)
+                filament_used = print_stats.get('filament_used', 0.0)
+                print_duration = print_stats.get('print_duration', 0.0)
+                total_duration = print_stats.get('total_duration', 0.0)
                 filename = print_stats.get('filename', '')
                 
                 # Calculate progress percentage
                 progress_pct = 0.0
                 if total_duration > 0:
-                    progress_pct = (progress / total_duration) * 100
+                    progress_pct = (print_duration / total_duration) * 100
                 
                 # Only update marketplace on state changes
                 if last_state != state:
@@ -976,7 +977,12 @@ class JobManager:
                         await self._update_job_status(job_id, 'paused', f"Print paused at {progress_pct:.1f}%")
                     elif state == 'complete':
                         logging.info(f"LMNT MONITOR: Print job {job_id} completed successfully")
-                        await self._update_job_status(job_id, 'completed', "Print completed successfully")
+                        stats = {
+                            'filament_used': filament_used,
+                            'print_duration': print_duration,
+                            'total_duration': total_duration
+                        }
+                        await self._update_job_status(job_id, 'completed', "Print completed successfully", stats=stats)
                         self.current_print_job = None
                         break
                     elif state in ['error', 'cancelled']:
@@ -1029,14 +1035,16 @@ class JobManager:
         except Exception as e:
             logging.error(f"LMNT MONITOR: Fallback status check failed for job {job_id}: {e}")
     
-    async def _update_job_status(self, job_id, status, message=None):
+    async def _update_job_status(self, job_id, status, message=None, stats=None):
         """
         Update job status in the marketplace
         
         Args:
             job_id (str): Job ID
             status (str): New status ('processing', 'printing', 'completed', 'failed', 'cancelled')
+            status (str): New status ('processing', 'printing', 'completed', 'failed', 'cancelled')
             message (str, optional): Status message
+            stats (dict, optional): Print statistics (filament_used, print_duration, total_duration)
             
         Returns:
             bool: True if status update was successful, False otherwise
@@ -1068,6 +1076,9 @@ class JobManager:
             
             if message:
                 payload["message"] = message
+            
+            if stats:
+                payload.update(stats)
             
             async with self.http_client.post(update_url, headers=headers, json=payload) as response:
                 if response.status == 200:

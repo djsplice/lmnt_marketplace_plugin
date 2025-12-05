@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.0] - 2025-12-04
+
+### Added
+- **Print Stats Collection**: Now collects `filament_used`, `print_duration`, and `total_duration` for detailed analytics.
+- **Enhanced Reporting**: Sends detailed print statistics to the marketplace API upon job completion.
+
+### Fixed
+- **Plugin Stability**: Fixed a crash in the print monitoring loop (`NameError`) that caused jobs to get stuck in "Processing".
+- **Token Synchronization**: Improved reliability of printer authentication and token refresh.
+
 ## [1.0.0] - 2025-12-03
 
 ### Initial Release
