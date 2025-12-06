@@ -935,6 +935,7 @@ class JobManager:
         logging.info(f"LMNT MONITOR: Starting print progress monitoring for job {job_id}")
         
         last_state = None
+        last_report_time = time.time()
         consecutive_errors = 0
         max_errors = 5
         
@@ -967,12 +968,24 @@ class JobManager:
                 if total_duration > 0:
                     progress_pct = (print_duration / total_duration) * 100
                 
-                # Only update marketplace on state changes
+                # Only update marketplace on state changes, or periodic heartbeat
+                current_time = time.time()
+                should_report = False
+                
                 if last_state != state:
-                    logging.info(f"LMNT MONITOR: Job {job_id} state changed: {last_state} → {state}")
+                    logging.info(f"LMNT MONITOR: Job {job_id} state changed: {last_state} -> {state}")
+                    should_report = True
+                elif current_time - last_report_time > 30: # 30s heartbeat
+                    logging.info(f"LMNT MONITOR: sending heartbeat for job {job_id} at {progress_pct:.1f}%")
+                    should_report = True
+                
+                if should_report:
+                    last_report_time = current_time
                     
-                    if state == 'printing' and last_state != 'printing':
-                        await self._update_job_status(job_id, 'printing', "Print started")
+                    if state == 'printing':
+                         # If it's just a heartbeat, message provides context
+                         msg = "Print started" if last_state != 'printing' else f"Printing: {progress_pct:.1f}%"
+                         await self._update_job_status(job_id, 'printing', msg)
                     elif state == 'paused':
                         await self._update_job_status(job_id, 'paused', f"Print paused at {progress_pct:.1f}%")
                     elif state == 'complete':
