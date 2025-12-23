@@ -95,18 +95,25 @@ else
 fi
 
 echo "Installation complete!"
-echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
-read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
-echo    # (optional) move to a new line
-if [[ $REPLY =~ ^[Yy]$ ]]
-then
-    echo "Restarting services... (sudo password may be required)"
-    sudo systemctl restart moonraker
-    sudo systemctl restart klipper
-    echo "Services restarted."
+
+if [ -t 0 ]; then
+    echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
+    read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
+    echo    # (optional) move to a new line
+    if [[ $REPLY =~ ^[Yy]$ ]]
+    then
+        echo "Restarting services... (sudo password may be required)"
+        sudo systemctl restart moonraker
+        sudo systemctl restart klipper
+        echo "Services restarted."
+    else
+        echo "Skipping restart."
+        echo "Please restart manually to activate the plugin:"
+        echo "sudo systemctl restart moonraker"
+        echo "sudo systemctl restart klipper"
+    fi
 else
-    echo "Skipping restart."
-    echo "Please restart manually to activate the plugin:"
-    echo "sudo systemctl restart moonraker"
-    echo "sudo systemctl restart klipper"
+    echo "Running in non-interactive mode (Update Manager)."
+    echo "Skipping manual service restart."
+    echo "Moonraker should handle service restarts automatically if configured in managed_services."
 fi
