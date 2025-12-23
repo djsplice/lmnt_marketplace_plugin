@@ -29,6 +29,13 @@ fi
 
 # Create symlinks directly to the repo (no copying needed)
 # This ensures updates via git pull are immediately active
+echo "Cleaning up old components..."
+rm -rf "${COMPONENT_DIR}/lmnt_marketplace"
+rm -rf "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
+rm -rf "${COMPONENT_DIR}/encrypted_print.py"
+rm -rf "${COMPONENT_DIR}/encrypted_provider.py"
+rm -rf "${COMPONENT_DIR}/ui"
+
 echo "Creating symlinks in Moonraker components directory..."
 ln -sf "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace" "${COMPONENT_DIR}/lmnt_marketplace"
 ln -sf "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
@@ -88,6 +95,18 @@ else
 fi
 
 echo "Installation complete!"
-echo "Please restart Moonraker and Klipper to activate the plugin:"
-echo "sudo systemctl restart moonraker"
-echo "sudo systemctl restart klipper"
+echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
+read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
+echo    # (optional) move to a new line
+if [[ $REPLY =~ ^[Yy]$ ]]
+then
+    echo "Restarting services... (sudo password may be required)"
+    sudo systemctl restart moonraker
+    sudo systemctl restart klipper
+    echo "Services restarted."
+else
+    echo "Skipping restart."
+    echo "Please restart manually to activate the plugin:"
+    echo "sudo systemctl restart moonraker"
+    echo "sudo systemctl restart klipper"
+fi
