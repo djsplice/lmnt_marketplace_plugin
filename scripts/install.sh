@@ -119,9 +119,27 @@ else
     echo -e "\n[lmnt_marketplace_plugin]\n\n[encrypted_print]\n"
 fi
 
+# Update printer.cfg
+echo "Updating printer.cfg..."
+if [ -f "${CONFIG_DIR}/printer.cfg" ]; then
+    if ! grep -q "\[encrypted_file_bridge\]" "${CONFIG_DIR}/printer.cfg"; then
+        echo -e "\n# LMNT Marketplace Plugin Klipper configuration" >> "${CONFIG_DIR}/printer.cfg"
+        echo -e "[encrypted_file_bridge]" >> "${CONFIG_DIR}/printer.cfg"
+        echo "Added [encrypted_file_bridge] to printer.cfg"
+    fi
+     if ! grep -q "\[secure_print\]" "${CONFIG_DIR}/printer.cfg"; then
+        echo -e "\n[secure_print]" >> "${CONFIG_DIR}/printer.cfg"
+        echo "Added [secure_print] to printer.cfg"
+    fi
+else
+    echo "Warning: printer.cfg not found at ${CONFIG_DIR}/printer.cfg"
+    echo "Please manually add the following to your printer.cfg:"
+    echo -e "\n[encrypted_file_bridge]\n\n[secure_print]\n"
+fi
+
 echo "Installation complete!"
 
-if [ -t 0 ]; then
+if [ -t 0 ]; then:
     echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
     read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
     echo    # (optional) move to a new line
