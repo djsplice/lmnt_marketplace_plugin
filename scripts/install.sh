@@ -139,7 +139,7 @@ fi
 
 echo "Installation complete!"
 
-if [ -t 0 ]; then:
+if [ -t 0 ]; then
     echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
     read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
     echo    # (optional) move to a new line
