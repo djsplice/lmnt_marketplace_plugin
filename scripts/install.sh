@@ -27,6 +27,31 @@ if [ ! -d "${COMPONENT_DIR}" ]; then
     exit 1
 fi
 
+# -------------------------------------------------------------------------
+# BOOTSTRAP REPO if running via pipe or outside repo
+# -------------------------------------------------------------------------
+
+# Check if we are running from within a valid repo structure
+if [ ! -f "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" ]; then
+    echo "Installer running outside of plugin repository (likely via curl | bash)."
+    
+    REPO_DIR="${HOME}/lmnt_marketplace_plugin"
+    REPO_URL="https://github.com/djsplice/lmnt_marketplace_plugin.git"
+    
+    if [ ! -d "${REPO_DIR}" ]; then
+        echo "Cloning plugin repository to ${REPO_DIR}..."
+        git clone "${REPO_URL}" "${REPO_DIR}"
+    else
+        echo "Updating existing plugin repository at ${REPO_DIR}..."
+        cd "${REPO_DIR}"
+        git fetch origin
+        git reset --hard origin/main
+    fi
+else
+    echo "Installer running from local repository at ${REPO_DIR}"
+fi
+# -------------------------------------------------------------------------
+
 # Create symlinks directly to the repo (no copying needed)
 # This ensures updates via git pull are immediately active
 echo "Cleaning up old components..."
