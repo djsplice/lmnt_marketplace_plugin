@@ -181,7 +181,10 @@ class JobManager:
                 logging.info("LMNT FIREBASE: Listener cancelled")
                 break
             except Exception as e:
-                logging.error(f"LMNT FIREBASE: Error in listener: {str(e)}")
+                logging.error(f"LMNT FIREBASE: Error in listener loop: {str(e)}")
+                import traceback
+                logging.error(f"LMNT FIREBASE: {traceback.format_exc()}")
+                logging.info("LMNT FIREBASE: Restarting listener after error in 10 seconds...")
                 await asyncio.sleep(10)
 
     

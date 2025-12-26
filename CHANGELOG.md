@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.14] - 2025-12-26
+### Fixed
+- **Stability**: Hardened Firebase listener loop with auto-restart to prevent disconnection/crashes.
+- **Error Handling**: Improved resiliency against backend polling errors (e.g. 500 status).
+
 ## [1.1.6] - 2025-12-04
 ### Fixed
 - **CRITICAL**: Fixed API version mismatch causing 401 Unauthorized errors
