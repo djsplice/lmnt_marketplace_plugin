@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.15] - 2025-12-26
+### Fixed
+- **Print Progress**: Prioritize `virtual_sdcard` byte-based progress reporting (matches Mainsail/Flask) over inaccurate time-based estimates.
+
 ## [1.1.14] - 2025-12-26
 ### Fixed
 - **Stability**: Hardened Firebase listener loop with auto-restart to prevent disconnection/crashes.

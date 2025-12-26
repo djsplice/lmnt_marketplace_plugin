@@ -944,12 +944,18 @@ class JobManager:
         
         while self.current_print_job and self.current_print_job.get('id') == job_id:
             try:
-                # Query print stats directly from Klipper
+                # Query print stats and progress sources from Klipper
                 if not self.klippy_apis:
                     logging.error(f"LMNT MONITOR: No Klippy APIs available for job {job_id}")
                     break
-                    
-                result = await self.klippy_apis.query_objects({'print_stats': None})
+                
+                # Request print_stats, virtual_sdcard, and display_status
+                result = await self.klippy_apis.query_objects({
+                    'print_stats': None,
+                    'virtual_sdcard': None,
+                    'display_status': None
+                })
+                
                 if not result or 'print_stats' not in result:
                     consecutive_errors += 1
                     if consecutive_errors >= max_errors:
@@ -960,15 +966,25 @@ class JobManager:
                 
                 consecutive_errors = 0  # Reset error count on success
                 print_stats = result['print_stats']
+                virtual_sdcard = result.get('virtual_sdcard', {})
+                display_status = result.get('display_status', {})
+                
                 state = print_stats.get('state', 'unknown')
                 filament_used = print_stats.get('filament_used', 0.0)
                 print_duration = print_stats.get('print_duration', 0.0)
                 total_duration = print_stats.get('total_duration', 0.0)
-                filename = print_stats.get('filename', '')
                 
                 # Calculate progress percentage
                 progress_pct = 0.0
-                if total_duration > 0:
+                
+                # 1. Prefer virtual_sdcard progress (byte position) - Most accurate for streamed/virtual files
+                if 'progress' in virtual_sdcard:
+                    progress_pct = virtual_sdcard['progress'] * 100
+                # 2. Fallback to display_status progress
+                elif 'progress' in display_status:
+                    progress_pct = display_status['progress'] * 100
+                # 3. Fallback to time-based estimation (Least accurate)
+                elif total_duration > 0:
                     progress_pct = (print_duration / total_duration) * 100
                 
                 # Only update marketplace on state changes, or periodic heartbeat
