@@ -211,24 +211,30 @@ class UnifiedPrintService:
             # Save current position
             current_pos = os.lseek(memfd, 0, os.SEEK_CUR)
             
-            # Read first 1MB for metadata parsing
+            # Read first 1MB (Header)
             os.lseek(memfd, 0, os.SEEK_SET)
-            content_bytes = os.read(memfd, 1024 * 1024)
-            content = content_bytes.decode('utf-8', errors='ignore')
+            header_content = os.read(memfd, 1024 * 1024).decode('utf-8', errors='ignore')
+            
+            # Read last 1MB (Footer)
+            try:
+                file_size = os.lseek(memfd, 0, os.SEEK_END)
+                footer_start = max(0, file_size - 1024 * 1024)
+                os.lseek(memfd, footer_start, os.SEEK_SET)
+                footer_content = os.read(memfd, 1024 * 1024).decode('utf-8', errors='ignore')
+            except Exception:
+                footer_content = ""
             
             # Restore position
             os.lseek(memfd, current_pos, os.SEEK_SET)
             
-            # Parse basic metadata from GCode content
-            # Extract estimated print time if available
-            time_match = re.search(r';\s*estimated printing time.*?=\s*([\d.]+)\s*h', content, re.IGNORECASE)
-            if time_match:
-                metadata['estimated_time'] = float(time_match.group(1)) * 3600  # Convert hours to seconds
+            # Combine content for parsing
+            full_content = header_content + "\n" + footer_content
             
-            # Extract filament usage if available
-            filament_match = re.search(r';\s*filament used.*?=\s*([\d.]+)\s*mm', content, re.IGNORECASE)
-            if filament_match:
-                metadata['filament_total'] = float(filament_match.group(1))
+            # Use centralized GCodeManager for parsing
+            parsed_metadata = self.integration.gcode_manager.parse_gcode_metadata(full_content)
+            
+            # Merge parsed metadata (update existing)
+            metadata.update(parsed_metadata)
             
             logging.info(f"[PrintService] Parsed metadata: {metadata}")
             return metadata
@@ -248,52 +254,17 @@ class UnifiedPrintService:
             Layer count or 0 if not found
         """
         try:
-            # Save current position
-            current_pos = os.lseek(memfd, 0, os.SEEK_CUR)
+            # Reuse _parse_metadata_from_memfd to get layer count
+            metadata = await self._parse_metadata_from_memfd(memfd, {})
+            layer_count = metadata.get('layer_count', 0)
             
-            # Read header and footer sections for layer count
-            os.lseek(memfd, 0, os.SEEK_SET)
-            header_content = os.read(memfd, 200 * 1024).decode('utf-8', errors='ignore')  # First 200KB
-            
-            # Try to read footer (last 800KB)
-            try:
-                file_size = os.lseek(memfd, 0, os.SEEK_END)
-                footer_start = max(0, file_size - 800 * 1024)
-                os.lseek(memfd, footer_start, os.SEEK_SET)
-                footer_content = os.read(memfd, 800 * 1024).decode('utf-8', errors='ignore')
-            except:
-                footer_content = ""
-            
-            # Restore position
-            os.lseek(memfd, current_pos, os.SEEK_SET)
-            
-            # Search for layer count patterns
-            content_to_search = header_content + "\n" + footer_content
-            layer_patterns = [
-                ';LAYER_COUNT:',
-                '; layer_count =',
-                '; total layers =',
-                '; total layers count =',
-                ';Total layers:',
-            ]
-            
-            for line in content_to_search.split('\n'):
-                line_upper = line.upper()
-                for pattern in layer_patterns:
-                    if pattern.upper() in line_upper:
-                        try:
-                            if ':' in line:
-                                layer_count = int(line.split(':')[-1].strip())
-                            elif '=' in line:
-                                layer_count = int(line.split('=')[-1].strip())
-                            logging.info(f"[PrintService] Found layer count: {layer_count}")
-                            return layer_count
-                        except (ValueError, IndexError):
-                            continue
-            
-            logging.warning("[PrintService] No layer count found in GCode")
-            return 0
-            
+            if layer_count > 0:
+                logging.info(f"[PrintService] Found layer count: {layer_count}")
+                return layer_count
+            else:
+                logging.warning("[PrintService] No layer count found in GCode")
+                return 0
+                
         except Exception as e:
             logging.error(f"[PrintService] Error extracting layer count: {e}")
             return 0

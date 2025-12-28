@@ -207,6 +207,56 @@ class GCodeManager:
         Returns:
             dict: Extracted metadata
         """
+        return self._do_extract_metadata(line, line_count)
+    def parse_gcode_metadata(self, content_chunk):
+        """
+        Parse metadata from a chunk of GCode text
+        
+        Args:
+            content_chunk (str): Decrypted GCode text chunk
+            
+        Returns:
+            dict: Extracted metadata
+        """
+        metadata = {}
+        # Split into lines
+        lines = content_chunk.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Use basic line extraction but accumulate results
+            # We pass a dummy line_count of 0 since we don't know the absolute line number
+            line_metadata = self._extract_metadata_from_line_sync(line, 0)
+            
+            # Update metadata with found values (ignore defaults)
+            for key, value in line_metadata.items():
+                # Only update if value is "valid" (non-zero/non-empty, except for specific keys)
+                if key in ['thumbnails', 'timestamp', 'job_id']: 
+                    continue
+                    
+                if isinstance(value, (int, float)) and value > 0:
+                    metadata[key] = value
+                elif isinstance(value, str) and value:
+                    metadata[key] = value
+                    
+        return metadata
+
+    def _extract_metadata_from_line_sync(self, line, line_count):
+        """
+        Synchronous version of _extract_metadata_from_line to reuse logic
+        without async overhead in tight loops
+        """
+        # Copy-paste logic from _extract_metadata_from_line minus async
+        # Or better, refactor _extract_metadata_from_line to call this
+        return self._do_extract_metadata(line, line_count)
+
+    def _do_extract_metadata(self, line, line_count):
+        """
+        Internal method to extract metadata from a single line
+        """
         metadata = {
             'job_id': self.current_job_id,
             'layer_count': 0,
@@ -223,8 +273,9 @@ class GCodeManager:
         }
         
         # Regular expressions for metadata extraction - made case insensitive and more flexible for OrcaSlicer format
-        layer_count_pattern = re.compile(r';\s*(?:total layer number|LAYER_COUNT|LAYERCOUNT|LAYERS)\s*[:=\s]\s*(\d+)', re.IGNORECASE)
+        layer_count_pattern = re.compile(r';\s*(?:total layer number|total layers|LAYER_COUNT|LAYERCOUNT|LAYERS)\s*[:=\s]\s*(\d+)', re.IGNORECASE)
         time_pattern = re.compile(r';\s*(?:TIME|ESTIMATED_TIME|PRINT_TIME)\s*[:=\s]\s*(\d+)', re.IGNORECASE)
+        time_hms_pattern = re.compile(r';\s*estimated printing time\s*=\s*(?:(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?)', re.IGNORECASE)
         filament_pattern = re.compile(r';\s*(?:FILAMENT_USED|FILAMENT|filament used|total filament used)\s*(?:\[mm\]|\[cm3\]|\[g\]|)\s*[:=\s]\s*([\d\.]+)(?:m|cm|mm|g)?', re.IGNORECASE)
         first_layer_height_pattern = re.compile(r';\s*(?:FIRST_LAYER_HEIGHT|FIRST_LAYER|first layer height|first layer extrusion width|first layer thickness)\s*[:=\s]\s*([\d\.]+)(?:mm)?', re.IGNORECASE)
         layer_height_pattern = re.compile(r';\s*(?:LAYER_HEIGHT|HEIGHT_PER_LAYER|layer height|perimeters extrusion width)\s*[:=\s]\s*([\d\.]+)(?:mm)?', re.IGNORECASE)
@@ -244,6 +295,13 @@ class GCodeManager:
             match = time_pattern.search(line)
             if match:
                 metadata['estimated_time'] = int(match.group(1))
+            else:
+                match = time_hms_pattern.search(line)
+                if match:
+                    hours = int(match.group(1)) if match.group(1) else 0
+                    minutes = int(match.group(2)) if match.group(2) else 0
+                    seconds = int(match.group(3)) if match.group(3) else 0
+                    metadata['estimated_time'] = hours * 3600 + minutes * 60 + seconds
             
             # Filament used
             match = filament_pattern.search(line)
@@ -281,6 +339,7 @@ class GCodeManager:
                 metadata['generated_by'] = match.group(1).strip()
         
         return metadata
+
     
     async def _extract_and_save_thumbnails(self, gcode_lines, job_id=None):
         """

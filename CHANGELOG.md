@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.16] - 2025-12-28
+### Fixed
+- **OrcaSlicer Metadata**: Fixed regression where layer count and estimated time were not being correctly parsed from OrcaSlicer generated GCode files.
+- **Metadata Parsing**: Refactored metadata extraction to scan both header and footer of GCode files for improved reliability.
+
 ## [1.1.15] - 2025-12-26
 ### Fixed
 - **Print Progress**: Prioritize `virtual_sdcard` byte-based progress reporting (matches Mainsail/Flask) over inaccurate time-based estimates.
