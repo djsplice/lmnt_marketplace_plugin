@@ -146,7 +146,7 @@ class JobManager:
                 
                 headers = {'Accept': 'text/event-stream'}
                 
-                timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
+                timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
                 
                 async with self.http_client.get(url, headers=headers, timeout=timeout) as response:
                     logging.info(f"LMNT FIREBASE: Connected with status {response.status}")
@@ -269,10 +269,12 @@ class JobManager:
         time_since_last_poll = now - self.last_poll_time
         
         if time_since_last_poll < backoff_duration:
-            logging.info(f"LMNT JOB POLLING: Skipping poll due to rate limiting/backoff. "
-                         f"Last poll was {time_since_last_poll:.1f}s ago, required wait: {backoff_duration:.1f}s "
+            wait_time = backoff_duration - time_since_last_poll
+            logging.info(f"LMNT JOB POLLING: Rate limit active. Waiting {wait_time:.2f}s before polling. "
                          f"(Errors: {self.consecutive_poll_errors})")
-            return
+            await asyncio.sleep(wait_time)
+            # Update 'now' after the sleep
+            now = time.time()
 
         logging.info("LMNT JOB POLLING: _poll_for_jobs method called")
         self.last_poll_time = now
