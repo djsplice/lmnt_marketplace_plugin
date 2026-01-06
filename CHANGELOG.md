@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.17] - 2026-01-05
+### Fixed
+- **Connection Reliability**: Added read timeout (120s) to Firebase listener to prevent silent "zombie" connections that don't recover.
+- **Poll Logic**: Fixed rate limiting logic to wait/sleep instead of dropping poll requests when triggered too quickly by multiple signals.
+
 ## [1.1.16] - 2025-12-28
 ### Fixed
 - **OrcaSlicer Metadata**: Fixed regression where layer count and estimated time were not being correctly parsed from OrcaSlicer generated GCode files.
