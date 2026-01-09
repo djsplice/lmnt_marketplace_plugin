@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.18] - 2026-01-08
+### Fixed
+- **Polling Reliability**: Added 30-minute total timeout to Firebase connection to force periodic refresh and prevent "zombie" states.
+- **Connection Diagnostics**: Added throttled logging of heartbeats to confirm connection health.
+- **Timeout Logic**: Reduced read timeout to 60s (was 120s) to detect dropped connections faster.
+
 ## [1.1.17] - 2026-01-05
 ### Fixed
 - **Connection Reliability**: Added read timeout (120s) to Firebase listener to prevent silent "zombie" connections that don't recover.

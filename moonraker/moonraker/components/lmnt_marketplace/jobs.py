@@ -146,7 +146,10 @@ class JobManager:
                 
                 headers = {'Accept': 'text/event-stream'}
                 
-                timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
+                # Set a total timeout to force a periodic reconnection (e.g. every 30 mins)
+                # This prevents "zombie" connections that stay established but stop receiving data
+                # Reduce sock_read to 60s to detect network drops faster (heartbeat is ~30s)
+                timeout = aiohttp.ClientTimeout(total=1800, sock_connect=30, sock_read=60)
                 
                 async with self.http_client.get(url, headers=headers, timeout=timeout) as response:
                     logging.info(f"LMNT FIREBASE: Connected with status {response.status}")
@@ -169,6 +172,13 @@ class JobManager:
                             elif line.startswith("data: "):
                                 # We could parse the data, but we just treat any data as a signal to poll
                                 pass
+                            
+                            # Log heartbeats/keepalives (throttled) to confirm connection health
+                            # Firebase keepalives are often just empty lines (handled above) or specific events
+                            now_ts = time.time()
+                            if not hasattr(self, '_last_keepalive_log') or (now_ts - self._last_keepalive_log > 300):
+                                logging.info("LMNT FIREBASE: Connection healthy (received heartbeat/data)")
+                                self._last_keepalive_log = now_ts
                                 
                     elif response.status == 401:
                         logging.error("LMNT FIREBASE: Unauthorized (401). Check security rules.")
@@ -177,6 +187,9 @@ class JobManager:
                         logging.error(f"LMNT FIREBASE: Connection failed with status {response.status}")
                         await asyncio.sleep(10)
                         
+            except asyncio.TimeoutError:
+                logging.info("LMNT FIREBASE: Connection timed out (scheduled refresh or network drop). Reconnecting...")
+                await asyncio.sleep(1)
             except asyncio.CancelledError:
                 logging.info("LMNT FIREBASE: Listener cancelled")
                 break
