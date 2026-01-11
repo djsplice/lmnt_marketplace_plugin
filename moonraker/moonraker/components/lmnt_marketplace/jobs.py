@@ -70,7 +70,7 @@ class JobManager:
         """Register HTTP endpoints for job management"""
         # Job status endpoint
         register_endpoint(
-            "/lmnt/job_status", 
+            "/machine/lmnt/job_status", 
             ["GET"], 
             self._handle_job_status,
             transports=["http"]
@@ -78,7 +78,7 @@ class JobManager:
         
         # Manual job start endpoint
         register_endpoint(
-            "/lmnt/start_job", 
+            "/machine/lmnt/start_job", 
             ["POST"], 
             self._handle_start_job,
             transports=["http"]

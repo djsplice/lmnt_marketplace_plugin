@@ -1,5 +1,8 @@
 # Changelog
 
+## [1.1.22] - 2026-01-11
+- fix(critical): Add missing `http_client` attribute initialization in `LmntMarketplaceIntegration.__init__` to prevent `AttributeError` on startup.
+
 ## [1.1.21] - 2026-01-11
 - fix(reliability): Ensure HTTP sessions are gracefully closed during re-initialization (e.g., after firmware restart) to prevent resource leaks.
 - fix(reliability): Hardened component discovery in `encrypted_print.py` with retries and broad scanning to resolve intermittent lookup failures.

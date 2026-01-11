@@ -169,7 +169,7 @@ class AuthManager:
         """Register HTTP endpoints for authentication"""
         # Printer registration endpoint
         register_endpoint(
-            "/lmnt/register", 
+            "/machine/lmnt/register", 
             ["POST"], 
             self._handle_register_printer,
             transports=["http"]
@@ -177,7 +177,7 @@ class AuthManager:
         
         # Manual registration endpoint
         register_endpoint(
-            "/lmnt/manual_register", 
+            "/machine/lmnt/manual_register", 
             ["POST"], 
             self._handle_manual_register,
             transports=["http"]
