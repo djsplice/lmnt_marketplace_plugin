@@ -65,7 +65,20 @@ class EncryptedPrint:
         try:
             self.klippy_apis = self.server.lookup_component("klippy_apis")
             self.file_manager = self.server.lookup_component("file_manager")
-            lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
+            
+            # Try to lookup the LMNT Marketplace component using both naming conventions
+            lmnt_component = None
+            for name in ["lmnt_marketplace_plugin", "lmnt_marketplace"]:
+                try:
+                    lmnt_component = self.server.lookup_component(name)
+                    logging.info(f"[EncryptedPrint] Found LMNT Marketplace component locally as: {name}")
+                    break
+                except Exception:
+                    continue
+            
+            if lmnt_component is None:
+                raise ServerError("Component (lmnt_marketplace_plugin or lmnt_marketplace) not found")
+                
             self.lmnt_integration = lmnt_component.integration
             self.crypto_manager = self.lmnt_integration.crypto_manager
             self.print_service = self.lmnt_integration.print_service
@@ -81,7 +94,18 @@ class EncryptedPrint:
             # Just-in-time component lookup to prevent race conditions
             if self.print_service is None:
                 if self.lmnt_integration is None:
-                    lmnt_component = self.server.lookup_component("lmnt_marketplace_plugin")
+                    # Try to lookup the LMNT Marketplace component using both naming conventions
+                    lmnt_component = None
+                    for name in ["lmnt_marketplace_plugin", "lmnt_marketplace"]:
+                        try:
+                            lmnt_component = self.server.lookup_component(name)
+                            break
+                        except Exception:
+                            continue
+                    
+                    if lmnt_component is None:
+                        raise ServerError("Component (lmnt_marketplace_plugin or lmnt_marketplace) not found")
+                        
                     self.lmnt_integration = lmnt_component.integration
                 self.print_service = self.lmnt_integration.print_service
             
