@@ -122,6 +122,23 @@ class AuthManager:
         except Exception as e:
             logging.warning(f"LMNT AUTH: Could not schedule initial token refresh check: {e}")
 
+    async def handle_klippy_shutdown(self):
+        """
+        Handle Klippy shutdown event
+        """
+        logging.info("LMNT AUTH: Handling Klippy shutdown")
+        self.klippy_apis = None
+        
+        # Close HTTP client if we own it
+        if self._owns_http_client and self.http_client is not None:
+            try:
+                await self.http_client.close()
+                logging.info("LMNT AUTH: Closed internal HTTP client")
+            except Exception as e:
+                logging.error(f"LMNT AUTH: Error closing HTTP client during shutdown: {e}")
+        
+        self.http_client = None
+
     def _ensure_http_client(self):
         """
         Ensure that an HTTP client is available.

@@ -43,6 +43,14 @@ class CryptoManager:
         """Initialize with Klippy APIs and HTTP client"""
         self.klippy_apis = klippy_apis
         self.http_client = http_client
+
+    async def handle_klippy_shutdown(self):
+        """
+        Handle Klippy shutdown event
+        """
+        logging.info("LMNT CRYPTO: Handling Klippy shutdown")
+        self.klippy_apis = None
+        self.http_client = None
     
     async def decrypt_dek(self, encrypted_gcode_dek_package):
         """Async wrapper to decrypt the G-code DEK without blocking the event loop.

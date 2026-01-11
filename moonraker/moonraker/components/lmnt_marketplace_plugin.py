@@ -58,6 +58,9 @@ class LmntMarketplacePlugin:
         
         # Register legacy endpoints for backward compatibility
         self._register_legacy_endpoints()
+
+        # Register modular endpoints
+        self.integration.register_endpoints(self.server.register_endpoint)
         
         logging.info("[LMNT Marketplace] LMNT Marketplace Plugin initialized successfully")
     

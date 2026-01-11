@@ -155,6 +155,13 @@ class LmntMarketplaceIntegration:
         await self.print_service.initialize(klippy_apis, self.server.lookup_component('file_manager'))
         
         logging.info("LMNT Marketplace Integration initialized with Klippy APIs")
+
+    def register_endpoints(self, register_endpoint):
+        """
+        Register HTTP endpoints for all components
+        """
+        self.auth_manager.register_endpoints(register_endpoint)
+        self.job_manager.register_endpoints(register_endpoint)
     
     async def on_klippy_ready(self, klippy_apis):
         pass
@@ -171,6 +178,7 @@ class LmntMarketplaceIntegration:
         await self.crypto_manager.handle_klippy_shutdown()
         await self.gcode_manager.handle_klippy_shutdown()
         await self.job_manager.handle_klippy_shutdown()
+        await self.print_service.handle_klippy_shutdown()
     
     async def close(self):
         """

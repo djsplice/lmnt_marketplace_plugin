@@ -55,6 +55,14 @@ class UnifiedPrintService:
         """Initialize with required components"""
         self.klippy_apis = klippy_apis
         self.file_manager = file_manager
+
+    async def handle_klippy_shutdown(self):
+        """
+        Handle Klippy shutdown event
+        """
+        logging.info("LMNT PRINT SERVICE: Handling Klippy shutdown")
+        self.klippy_apis = None
+        self.file_manager = None
         
     async def start_encrypted_print(self, print_job: PrintJob) -> PrintResult:
         """

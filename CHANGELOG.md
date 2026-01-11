@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.19] - 2026-01-11
+- fix(reliability): Implement missing Klippy shutdown handlers to prevent `AttributeError` crash.
+- fix(api): Correctly register plugin-specific endpoints (e.g., `/lmnt/job_status`) to resolve 404 errors.
+
 ## [1.1.18] - 2026-01-08
 ### Fixed
 - **Polling Reliability**: Added 30-minute total timeout to Firebase connection to force periodic refresh and prevent "zombie" states.
