@@ -66,46 +66,65 @@ class EncryptedPrint:
             self.klippy_apis = self.server.lookup_component("klippy_apis")
             self.file_manager = self.server.lookup_component("file_manager")
             
-            # Try to lookup the LMNT Marketplace component using both naming conventions
-            lmnt_component = None
-            for name in ["lmnt_marketplace_plugin", "lmnt_marketplace"]:
-                try:
-                    lmnt_component = self.server.lookup_component(name)
-                    logging.info(f"[EncryptedPrint] Found LMNT Marketplace component locally as: {name}")
-                    break
-                except Exception:
-                    continue
-            
-            if lmnt_component is None:
-                raise ServerError("Component (lmnt_marketplace_plugin or lmnt_marketplace) not found")
-                
-            self.lmnt_integration = lmnt_component.integration
-            self.crypto_manager = self.lmnt_integration.crypto_manager
-            self.print_service = self.lmnt_integration.print_service
-            logging.info("[EncryptedPrint] All components successfully initialized.")
+            # Try to lookup the LMNT Marketplace component
+            lmnt_component = await self._get_lmnt_component()
+            if lmnt_component:
+                self.lmnt_integration = lmnt_component.integration
+                self.crypto_manager = self.lmnt_integration.crypto_manager
+                self.print_service = self.lmnt_integration.print_service
+                logging.info("[EncryptedPrint] All components successfully initialized.")
+            else:
+                logging.error("[EncryptedPrint] Failed to find LMNT Marketplace component after multiple attempts.")
         except Exception as e:
             logging.exception(
                 "[EncryptedPrint] Failed to initialize components after Klippy ready")
 
         return False  # Return False to unregister this handler after it runs
 
+    async def _get_lmnt_component(self):
+        """
+        Robustly find the LMNT Marketplace component with retries and broad scanning.
+        """
+        for attempt in range(1, 4):
+            # 1. Try common names
+            for name in ["lmnt_marketplace_plugin", "lmnt_marketplace"]:
+                try:
+                    comp = self.server.lookup_component(name)
+                    logging.info(f"[EncryptedPrint] Found LMNT Marketplace component as: {name}")
+                    return comp
+                except Exception:
+                    continue
+            
+            # 2. Brute force scan for anything "lmnt"
+            try:
+                for comp_name, comp_obj in self.server.components.items():
+                    if "lmnt" in comp_name.lower() and comp_name != "encrypted_print":
+                        logging.info(f"[EncryptedPrint] Found LMNT component via broad scan: {comp_name}")
+                        return comp_obj
+            except Exception as e:
+                logging.warning(f"[EncryptedPrint] Broad scan failed: {e}")
+
+            if attempt < 3:
+                logging.info(f"[EncryptedPrint] Component not found, retrying in 0.5s (attempt {attempt}/3)...")
+                await asyncio.sleep(0.5)
+        
+        # Final failure state: log what we DID find to help debug
+        try:
+            available = list(self.server.components.keys())
+            logging.error(f"[EncryptedPrint] Could not find LMNT component. Available components: {available}")
+        except Exception:
+            pass
+            
+        return None
+
     async def handle_encrypted_print(self, web_request):
         try:
             # Just-in-time component lookup to prevent race conditions
             if self.print_service is None:
                 if self.lmnt_integration is None:
-                    # Try to lookup the LMNT Marketplace component using both naming conventions
-                    lmnt_component = None
-                    for name in ["lmnt_marketplace_plugin", "lmnt_marketplace"]:
-                        try:
-                            lmnt_component = self.server.lookup_component(name)
-                            break
-                        except Exception:
-                            continue
-                    
+                    lmnt_component = await self._get_lmnt_component()
                     if lmnt_component is None:
-                        raise ServerError("Component (lmnt_marketplace_plugin or lmnt_marketplace) not found")
-                        
+                        raise ServerError("Component (lmnt_marketplace_plugin or lmnt_marketplace) not found", 503)
                     self.lmnt_integration = lmnt_component.integration
                 self.print_service = self.lmnt_integration.print_service
             

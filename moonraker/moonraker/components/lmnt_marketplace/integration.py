@@ -141,6 +141,21 @@ class LmntMarketplaceIntegration:
             f"total={timeout.total}, connect={timeout.connect}, sock_read={timeout.sock_read}"
         )
         
+        # Close existing client if it exists to prevent "Unclosed client session" warnings
+        if self.http_client is not None:
+            try:
+                logging.info("Closing existing HTTP client session before re-initialization")
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # We can't await in a non-async def if it's called from elsewhere, 
+                    # but initialize is async so we are good.
+                    await self.http_client.close()
+                else:
+                    # Fallback for synchronous context if any
+                    asyncio.run(self.http_client.close())
+            except Exception as e:
+                logging.warning(f"Error closing existing HTTP client: {e}")
+
         self.http_client = aiohttp.ClientSession(
             connector=connector,
             timeout=timeout

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.21] - 2026-01-11
+- fix(reliability): Ensure HTTP sessions are gracefully closed during re-initialization (e.g., after firmware restart) to prevent resource leaks.
+- fix(reliability): Hardened component discovery in `encrypted_print.py` with retries and broad scanning to resolve intermittent lookup failures.
+
 ## [1.1.20] - 2026-01-11
 - fix(reliability): Improve component lookup in `encrypted_print.py` to handle both `lmnt_marketplace_plugin` and `lmnt_marketplace` names, resolving intermittent "Component not found" errors after firmware restarts.
 
