@@ -27,6 +27,19 @@ if [ ! -d "${COMPONENT_DIR}" ]; then
     exit 1
 fi
 
+# Check if Klipper is installed
+if [ ! -d "${KLIPPER_DIR}" ]; then
+    echo "Klipper not found at ${KLIPPER_DIR}. Please install Klipper first."
+    exit 1
+fi
+
+# Check if printer_data exists (standard Klipper install)
+if [ ! -d "${HOME}/printer_data" ]; then
+    echo "Standard 'printer_data' directory not found at ${HOME}/printer_data."
+    echo "This plugin requires a standard Klipper/Moonraker folder structure."
+    exit 1
+fi
+
 # -------------------------------------------------------------------------
 # BOOTSTRAP REPO if running via pipe or outside repo
 # -------------------------------------------------------------------------
@@ -86,8 +99,8 @@ if [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
     if ! grep -q "\[lmnt_marketplace_plugin\]" "${CONFIG_DIR}/moonraker.conf"; then
         echo -e "\n# LMNT Marketplace Plugin configuration" >> "${CONFIG_DIR}/moonraker.conf"
         echo -e "[lmnt_marketplace_plugin]" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "marketplace_url: https://printers.lmnt.co" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "firebase_project_id: lmnt-dev" >> "${CONFIG_DIR}/moonraker.conf"
+        echo -e "marketplace_url: https://api.lmnt.co" >> "${CONFIG_DIR}/moonraker.conf"
+        echo -e "firebase_project_id: lmnt-prod" >> "${CONFIG_DIR}/moonraker.conf"
         echo -e "check_interval: 0" >> "${CONFIG_DIR}/moonraker.conf"
         echo -e "\n[encrypted_print]" >> "${CONFIG_DIR}/moonraker.conf"
         echo "Added [lmnt_marketplace_plugin] to moonraker.conf"
