@@ -133,21 +133,110 @@ else
 fi
 
 # Update printer.cfg
+# Update printer.cfg
 echo "Updating printer.cfg..."
 if [ -f "${CONFIG_DIR}/printer.cfg" ]; then
+    SAVE_CONFIG_MARKER="#*# <---------------------- SAVE_CONFIG ---------------------->"
+    
+    # Helper function to insert config
+    insert_config() {
+        local content="$1"
+        local check_grep="$2"
+        local file="${CONFIG_DIR}/printer.cfg"
+        
+        if ! grep -q "$check_grep" "$file"; then
+            if grep -qF "$SAVE_CONFIG_MARKER" "$file"; then
+                # Insert before SAVE_CONFIG
+                # Use a temp file to hold the content to allow safe insertion with newlines
+                local tmp_conf=$(mktemp)
+                echo -e "$content" > "$tmp_conf"
+                
+                # Use sed to read in the temp file before the marker
+                # We use specific syntax to make it robust
+                sed -i -e "/$SAVE_CONFIG_MARKER/e cat $tmp_conf" -e "//N" "$file" 2>/dev/null || \
+                sed -i "/$SAVE_CONFIG_MARKER/i $content" "$file" 
+                
+                # The above sed tricks are complex/risky across versions. 
+                # Simpler approach: Split file options.
+                
+                # Let's use a standard robust approach:
+                # 1. Line number of marker
+                local line_num=$(grep -nF "$SAVE_CONFIG_MARKER" "$file" | cut -d: -f1 | head -n 1)
+                
+                if [ -n "$line_num" ]; then
+                    # Insert content at that line (shifting existing down)
+                    # We can use sed to read the content file in at that address
+                    sed -i "${line_num}i $content" "$file"
+                    echo "Inserted config before SAVE_CONFIG block."
+                else
+                    # Fallback
+                     echo -e "$content" >> "$file"
+                fi
+                rm -f "$tmp_conf" 2>/dev/null
+            else
+                echo -e "$content" >> "$file"
+                echo "Appended config to end of file."
+            fi
+        fi
+    }
+
+    # Construct clean content blocks
+    BLOCK1="\n# LMNT Marketplace Plugin Klipper configuration\n[encrypted_file_bridge]"
+    BLOCK2="\n[secure_print]"
+
+    # We need to verify if we can simply pass newlines to sed 'i' command.
+    # On many linux sed versions, we can use literal backslash newlines or just multiple -e.
+    # But a safer way is to use a temp file and `r` command in sed, OR simply split the file.
+    
+    # Let's use the line number + head/tail approach which is POSIX safe and robust.
+    
+    # 1. Encrypted File Bridge
     if ! grep -q "\[encrypted_file_bridge\]" "${CONFIG_DIR}/printer.cfg"; then
-        echo -e "\n# LMNT Marketplace Plugin Klipper configuration" >> "${CONFIG_DIR}/printer.cfg"
-        echo -e "[encrypted_file_bridge]" >> "${CONFIG_DIR}/printer.cfg"
-        echo "Added [encrypted_file_bridge] to printer.cfg"
+        if grep -qF "$SAVE_CONFIG_MARKER" "${CONFIG_DIR}/printer.cfg"; then
+            LINE=$(grep -nF "$SAVE_CONFIG_MARKER" "${CONFIG_DIR}/printer.cfg" | cut -d: -f1 | head -n 1)
+            # Create a temp file with the header + remaining file from marker
+            tail -n +$LINE "${CONFIG_DIR}/printer.cfg" > "${CONFIG_DIR}/printer.cfg.tail"
+            # Truncate original to before marker
+            head -n $((LINE-1)) "${CONFIG_DIR}/printer.cfg" > "${CONFIG_DIR}/printer.cfg.tmp"
+            
+            # Append our config
+            echo -e "$BLOCK1" >> "${CONFIG_DIR}/printer.cfg.tmp"
+            
+            # Append tail back
+            cat "${CONFIG_DIR}/printer.cfg.tail" >> "${CONFIG_DIR}/printer.cfg.tmp"
+            
+            # Move back
+            mv "${CONFIG_DIR}/printer.cfg.tmp" "${CONFIG_DIR}/printer.cfg"
+            rm "${CONFIG_DIR}/printer.cfg.tail"
+            echo "Inserted [encrypted_file_bridge] before SAVE_CONFIG."
+        else
+            echo -e "$BLOCK1" >> "${CONFIG_DIR}/printer.cfg"
+             echo "Appended [encrypted_file_bridge] to printer.cfg"
+        fi
     fi
-     if ! grep -q "\[secure_print\]" "${CONFIG_DIR}/printer.cfg"; then
-        echo -e "\n[secure_print]" >> "${CONFIG_DIR}/printer.cfg"
-        echo "Added [secure_print] to printer.cfg"
+
+    # 2. Secure Print
+    if ! grep -q "\[secure_print\]" "${CONFIG_DIR}/printer.cfg"; then
+         if grep -qF "$SAVE_CONFIG_MARKER" "${CONFIG_DIR}/printer.cfg"; then
+            LINE=$(grep -nF "$SAVE_CONFIG_MARKER" "${CONFIG_DIR}/printer.cfg" | cut -d: -f1 | head -n 1)
+            tail -n +$LINE "${CONFIG_DIR}/printer.cfg" > "${CONFIG_DIR}/printer.cfg.tail"
+            head -n $((LINE-1)) "${CONFIG_DIR}/printer.cfg" > "${CONFIG_DIR}/printer.cfg.tmp"
+            
+            echo -e "$BLOCK2" >> "${CONFIG_DIR}/printer.cfg.tmp"
+            cat "${CONFIG_DIR}/printer.cfg.tail" >> "${CONFIG_DIR}/printer.cfg.tmp"
+            
+            mv "${CONFIG_DIR}/printer.cfg.tmp" "${CONFIG_DIR}/printer.cfg"
+            rm "${CONFIG_DIR}/printer.cfg.tail"
+            echo "Inserted [secure_print] before SAVE_CONFIG."
+        else
+            echo -e "$BLOCK2" >> "${CONFIG_DIR}/printer.cfg"
+            echo "Appended [secure_print] to printer.cfg"
+        fi
     fi
+
 else
     echo "Warning: printer.cfg not found at ${CONFIG_DIR}/printer.cfg"
-    echo "Please manually add the following to your printer.cfg:"
-    echo -e "\n[encrypted_file_bridge]\n\n[secure_print]\n"
+    echo "Please manually add [encrypted_file_bridge] and [secure_print] to your printer.cfg (ABOVE invalid sections like SAVE_CONFIG)."
 fi
 
 echo "Installation complete!"
@@ -169,7 +258,35 @@ if [ -t 0 ]; then
         echo "sudo systemctl restart klipper"
     fi
 else
-    echo "Running in non-interactive mode (Update Manager)."
-    echo "Skipping manual service restart."
-    echo "Moonraker should handle service restarts automatically if configured in managed_services."
+    echo "Running in non-interactive mode."
+    
+    # Smart Auto-Restart Logic
+    # Check parent process to see if we are running under Moonraker (Update Manager)
+    # If parent is python, we shouldn't kill it.
+    PARENT_COMM=$(ps -o comm= $PPID 2>/dev/null || echo "unknown")
+    
+    if [[ "$PARENT_COMM" == *"python"* ]]; then
+        echo "Detected execution by Moonraker Update Manager (Parent: $PARENT_COMM)."
+        echo "Skipping manual service restart to prevent interrupting the update process."
+        echo "Moonraker should handle the restart automatically."
+    else
+        echo "Detected independent execution (Parent: $PARENT_COMM)."
+        echo "Attempting to restart services automatically..."
+        
+        # Try to restart; if it fails (e.g. sudo needs password), warn the user.
+        if sudo -n systemctl restart moonraker 2>/dev/null && sudo -n systemctl restart klipper 2>/dev/null; then
+            echo -e "${GREEN}Services restarted successfully!${NC}"
+        else
+             # If sudo -n failed, try standard sudo (might work if user configured NOPASSWD for systemctl)
+             # But since we are non-interactive, standard sudo might fail if it asks for a pass.
+             if sudo systemctl restart moonraker && sudo systemctl restart klipper; then
+                echo -e "${GREEN}Services restarted successfully!${NC}"
+             else
+                echo -e "${YELLOW}Could not auto-restart services (sudo password required?).${NC}"
+                echo "Please restart manually:"
+                echo "  sudo systemctl restart moonraker"
+                echo "  sudo systemctl restart klipper"
+             fi
+        fi
+    fi
 fi
