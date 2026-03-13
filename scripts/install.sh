@@ -65,6 +65,18 @@ else
 fi
 # -------------------------------------------------------------------------
 
+# -------------------------------------------------------------------------
+# DEPENDENCIES (Virtual Environment)
+# -------------------------------------------------------------------------
+VENV_DIR="${REPO_DIR}/.venv"
+echo "Setting up plugin isolated virtual environment at ${VENV_DIR}..."
+if [ ! -d "${VENV_DIR}" ]; then
+    python3 -m venv "${VENV_DIR}"
+fi
+echo "Installing dependencies..."
+"${VENV_DIR}/bin/pip" install --disable-pip-version-check -r "${REPO_DIR}/requirements.txt"
+# -------------------------------------------------------------------------
+
 # Create symlinks directly to the repo (no copying needed)
 # This ensures updates via git pull are immediately active
 echo "Cleaning up old components..."
@@ -106,25 +118,30 @@ if [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
         echo "Added [lmnt_marketplace_plugin] to moonraker.conf"
     fi
 
-    # Check for [update_manager lmnt_marketplace]
-    if ! grep -q "\[update_manager lmnt_marketplace\]" "${CONFIG_DIR}/moonraker.conf"; then
-        echo -e "\n[update_manager lmnt_marketplace]" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "type: git_repo" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "path: ${REPO_DIR}" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "origin: https://github.com/djsplice/lmnt_marketplace_plugin.git" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "primary_branch: main" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "env: ${HOME}/moonraker-env/bin/python" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "requirements: requirements.txt" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "install_script: scripts/install.sh" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "is_system_service: False" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "info_tags:" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "  desc: LMNT Marketplace Plugin" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "  channel: stable" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "  notes: https://github.com/djsplice/lmnt_marketplace_plugin/blob/main/CHANGELOG.md" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "managed_services:" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "    moonraker" >> "${CONFIG_DIR}/moonraker.conf"
-        echo -e "    klipper" >> "${CONFIG_DIR}/moonraker.conf"
-        echo "Added [update_manager lmnt_marketplace] to moonraker.conf"
+    # Check if system supports update_manager by looking for ANY [update_manager...] block
+    if grep -q "\[update_manager" "${CONFIG_DIR}/moonraker.conf"; then
+        if ! grep -q "\[update_manager lmnt_marketplace\]" "${CONFIG_DIR}/moonraker.conf"; then
+            echo -e "\n[update_manager lmnt_marketplace]" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "type: git_repo" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "path: ${REPO_DIR}" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "origin: https://github.com/djsplice/lmnt_marketplace_plugin.git" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "primary_branch: main" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "env: ${HOME}/moonraker-env/bin/python" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "requirements: requirements.txt" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "install_script: scripts/install.sh" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "is_system_service: False" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "info_tags:" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "  desc: LMNT Marketplace Plugin" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "  channel: stable" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "  notes: https://github.com/djsplice/lmnt_marketplace_plugin/blob/main/CHANGELOG.md" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "managed_services:" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "    moonraker" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "    klipper" >> "${CONFIG_DIR}/moonraker.conf"
+            echo "Added [update_manager lmnt_marketplace] to moonraker.conf"
+        fi
+    else
+        echo "Warning: [update_manager] not found in moonraker.conf. Skipping auto-update configuration."
+        echo "You will need to run '~/lmnt_marketplace_plugin/scripts/update.sh' manually to update the plugin."
     fi
 else
     echo "Warning: moonraker.conf not found at ${CONFIG_DIR}/moonraker.conf"
@@ -241,6 +258,34 @@ fi
 
 echo "Installation complete!"
 
+restart_services() {
+    # Try systemd first
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+        sudo -n systemctl restart moonraker 2>/dev/null || sudo systemctl restart moonraker
+        sudo -n systemctl restart klipper 2>/dev/null || sudo systemctl restart klipper
+        return 0
+    # Try SysVinit (for Snapmaker U1 and similar custom firmwares)
+    elif [ -x "/etc/init.d/S61moonraker" ]; then
+        if [ "$EUID" -eq 0 ]; then
+            /etc/init.d/S61moonraker restart
+            /etc/init.d/S60klipper restart
+            return 0
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo -n /etc/init.d/S61moonraker restart 2>/dev/null || sudo /etc/init.d/S61moonraker restart
+            sudo -n /etc/init.d/S60klipper restart 2>/dev/null || sudo /etc/init.d/S60klipper restart
+            return 0
+        else
+            echo "Cannot restart services automatically. 'sudo' is not installed and script is not running as root."
+            echo "Please log in as root and manually run:"
+            echo "  /etc/init.d/S61moonraker restart"
+            echo "  /etc/init.d/S60klipper restart"
+            return 1
+        fi
+    else
+        return 1
+    fi
+}
+
 if [ -t 0 ]; then
     echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
     read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
@@ -248,45 +293,33 @@ if [ -t 0 ]; then
     if [[ $REPLY =~ ^[Yy]$ ]]
     then
         echo "Restarting services... (sudo password may be required)"
-        sudo systemctl restart moonraker
-        sudo systemctl restart klipper
-        echo "Services restarted."
+        if restart_services; then
+            echo "Services restarted."
+        else
+            echo "Could not auto-restart services (unsupported init system or lack of permissions)."
+            echo "Please restart manually."
+        fi
     else
         echo "Skipping restart."
-        echo "Please restart manually to activate the plugin:"
-        echo "sudo systemctl restart moonraker"
-        echo "sudo systemctl restart klipper"
     fi
 else
     echo "Running in non-interactive mode."
     
     # Smart Auto-Restart Logic
-    # Check parent process to see if we are running under Moonraker (Update Manager)
-    # If parent is python, we shouldn't kill it.
     PARENT_COMM=$(ps -o comm= $PPID 2>/dev/null || echo "unknown")
     
     if [[ "$PARENT_COMM" == *"python"* ]]; then
         echo "Detected execution by Moonraker Update Manager (Parent: $PARENT_COMM)."
         echo "Skipping manual service restart to prevent interrupting the update process."
-        echo "Moonraker should handle the restart automatically."
     else
         echo "Detected independent execution (Parent: $PARENT_COMM)."
         echo "Attempting to restart services automatically..."
         
-        # Try to restart; if it fails (e.g. sudo needs password), warn the user.
-        if sudo -n systemctl restart moonraker 2>/dev/null && sudo -n systemctl restart klipper 2>/dev/null; then
-            echo -e "${GREEN}Services restarted successfully!${NC}"
+        if restart_services; then
+            echo -e "\033[0;32mServices restarted successfully!\033[0m"
         else
-             # If sudo -n failed, try standard sudo (might work if user configured NOPASSWD for systemctl)
-             # But since we are non-interactive, standard sudo might fail if it asks for a pass.
-             if sudo systemctl restart moonraker && sudo systemctl restart klipper; then
-                echo -e "${GREEN}Services restarted successfully!${NC}"
-             else
-                echo -e "${YELLOW}Could not auto-restart services (sudo password required?).${NC}"
-                echo "Please restart manually:"
-                echo "  sudo systemctl restart moonraker"
-                echo "  sudo systemctl restart klipper"
-             fi
+            echo -e "\033[0;33mCould not auto-restart services (sudo password required or unsupported init system).\033[0m"
+            echo "Please restart manually."
         fi
     fi
 fi

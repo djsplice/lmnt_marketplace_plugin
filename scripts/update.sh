@@ -54,5 +54,15 @@ fi
 
 echo "Update complete!"
 echo "Please restart Moonraker and Klipper to apply changes:"
-echo "sudo systemctl restart moonraker"
-#echo "sudo systemctl restart klipper"
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+    echo "sudo systemctl restart moonraker"
+    echo "sudo systemctl restart klipper"
+elif [ -x "/etc/init.d/S61moonraker" ]; then
+    echo "/etc/init.d/S61moonraker restart"
+    echo "/etc/init.d/S60klipper restart"
+    if ! command -v sudo >/dev/null 2>&1 && [ "$EUID" -ne 0 ]; then
+        echo "(You may need to run these as root since 'sudo' is not installed)"
+    fi
+else
+    echo "Please use your system's service manager to restart the 'moonraker' and 'klipper' services."
+fi

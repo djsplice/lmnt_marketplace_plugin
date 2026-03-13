@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.0] - 2026-03-13
+### Added
+- **Custom Firmware Support:** Full compatibility with non-standard Klipper environments like the Snapmaker U1 and `SnapmakerU1-Extended-Firmware`.
+- **SysVinit Support:** `install.sh`, `update.sh`, `uninstall.sh`, and `switch_env.sh` now automatically detect `SysVinit` service managers and fallback from `systemctl` cleanly.
+- **Isolated Virtual Environments:** The installer now creates an isolated Python `.venv` exclusively for the plugin inside its repository folder.
+- **Permission Fallbacks:** Maintenance scripts gracefully prompt the user for manual root intervention if `sudo` is unavailable instead of crashing mid-execution.
+
+### Fixed
+- **ModuleNotFoundError:** Dynamically injects `sys.path` via `os.path.realpath(__file__)` during Moonraker bootstrapping to guarantee dependencies (`PyJWT`, `PyNaCl`) are resolvable even when Moonraker is running on the system python interpreter.
+
 ## [1.1.22] - 2026-01-11
 - fix(critical): Add missing `http_client` attribute initialization in `LmntMarketplaceIntegration.__init__` to prevent `AttributeError` on startup.
 

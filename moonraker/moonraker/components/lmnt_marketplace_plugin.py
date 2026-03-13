@@ -9,6 +9,34 @@ import traceback
 import json as jsonw
 import time
 
+# To securely support both standard setups and custom firmwares (like Snapmaker) 
+# that run Moonraker on the system Python, we inject our plugin's isolated 
+# virtual environment into the Python path. This ensures dependencies like PyJWT 
+# and PyNaCl are always resolved from our isolated environment.
+
+# Use the realpath of this file to determine the repository root reliably
+# even when executed under a SysVinit daemon that strips environment variables
+current_file_path = os.path.realpath(__file__)
+repo_dir = os.path.abspath(os.path.join(os.path.dirname(current_file_path), "..", "..", ".."))
+
+venv_site_packages = os.path.join(
+    repo_dir, 
+    ".venv", "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+)
+
+# Use logging to track path injection (print often buffers or redirects to journalctl)
+try:
+    if os.path.isdir(venv_site_packages) and venv_site_packages not in sys.path:
+        # Insert near the front of the path to prioritize our strict dependencies
+        import site
+        site.addsitedir(venv_site_packages)   # Process .pth files just in case
+        sys.path.insert(1, venv_site_packages)
+        logging.info(f"[LMNT BOOTSTRAP] Successfully injected {venv_site_packages} into sys.path")
+    else:
+        logging.info(f"[LMNT BOOTSTRAP] Attempted to inject {venv_site_packages} but folder does not exist or is already patched.")
+except Exception as e:
+    logging.info(f"[LMNT BOOTSTRAP] Failed to process sys.path injection: {e}")
+
 from moonraker.common import RequestType
 
 # Import will be done in __init__ to avoid circular imports

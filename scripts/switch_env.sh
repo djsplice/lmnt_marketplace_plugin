@@ -70,8 +70,17 @@ if [[ "$TARGET_ENV" == "dev" && "$CURRENT_URL" == "$DEV_URL" ]]; then
 fi
 
 log "Stopping Moonraker service..."
-sudo systemctl stop moonraker
-
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+    sudo -n systemctl stop moonraker 2>/dev/null || sudo systemctl stop moonraker || warn "Failed to stop moonraker cleanly, continuing..."
+elif [ -x "/etc/init.d/S61moonraker" ]; then
+    if [ "$EUID" -eq 0 ]; then
+        /etc/init.d/S61moonraker stop || true
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -n /etc/init.d/S61moonraker stop 2>/dev/null || sudo /etc/init.d/S61moonraker stop || true
+    else
+        warn "'sudo' not installed. Could not stop Moonraker automatically."
+    fi
+fi
 log "Swapping data directories..."
 
 # Safety check: ensure main directory exists or was moved
@@ -139,6 +148,18 @@ elif [ "$TARGET_ENV" == "dev" ]; then
 fi
 
 log "Restarting Moonraker..."
-sudo systemctl restart moonraker
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+    sudo -n systemctl restart moonraker 2>/dev/null || sudo systemctl restart moonraker
+elif [ -x "/etc/init.d/S61moonraker" ]; then
+    if [ "$EUID" -eq 0 ]; then
+        /etc/init.d/S61moonraker restart
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -n /etc/init.d/S61moonraker restart 2>/dev/null || sudo /etc/init.d/S61moonraker restart
+    else
+        warn "Could not restart services automatically (sudo not installed)."
+        echo "Please log in as root and manually run:"
+        echo "  /etc/init.d/S61moonraker restart"
+    fi
+fi
 
 log "Done! Switched to $TARGET_ENV."

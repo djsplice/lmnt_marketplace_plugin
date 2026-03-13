@@ -84,6 +84,15 @@ marketplace_url: https://printers.lmnt.co
 *   `debug_mode`: Enable verbose logging (Default: False).
 *   `marketplace_url`: API endpoint (Default: https://printers.lmnt.co).
 
+### Custom Firmwares (Snapmaker U1, etc.)
+The LMNT Marketplace Plugin supports custom Klipper environments that do not map to traditional installation paradigms (e.g. `SysVinit` instead of `systemd`, or missing virtual environments). 
+
+- **Automated Restarts:** If your firmware's primary user (e.g. `lava`) lacks `sudo` privileges, `install.sh`, `update.sh`, and `uninstall.sh` will complete successfully but ask you to log in as `root` to manually restart the services.
+- **Updates:** Custom firmwares often cannot use Moonraker's built-in `[update_manager]` if they lack `sudo` or standard paths. To update the plugin on these machines, SSH into the printer and run:
+  ```bash
+  ~/lmnt_marketplace_plugin/scripts/update.sh
+  ```
+
 For manual installation instructions, see [docs/installation.md](docs/installation.md).
 
 ## Troubleshooting

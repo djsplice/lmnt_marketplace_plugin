@@ -53,7 +53,17 @@ fi
 
 # 2. Stop Services
 echo "Stopping Moonraker service..."
-sudo systemctl stop moonraker
+if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+    sudo -n systemctl stop moonraker 2>/dev/null || sudo systemctl stop moonraker || echo "Failed to stop moonraker cleanly, continuing..."
+elif [ -x "/etc/init.d/S61moonraker" ]; then
+    if [ "$EUID" -eq 0 ]; then
+        /etc/init.d/S61moonraker stop || true
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo -n /etc/init.d/S61moonraker stop 2>/dev/null || sudo /etc/init.d/S61moonraker stop || true
+    else
+        echo -e "${YELLOW}Warning: 'sudo' not installed. Could not stop Moonraker automatically.${NC}"
+    fi
+fi
 
 # 3. Remove Symlinks
 echo "Removing symlinks from Moonraker components directory..."
@@ -135,19 +145,40 @@ if [ -t 0 ]; then
     echo "WARNING: Restarting Moonraker and Klipper will stop any active print jobs."
     read -p "Do you want to restart Moonraker and Klipper now? (y/N) " -n 1 -r
     echo    # (optional) move to a new line
-    if [[ $REPLY =~ ^[Yy]$ ]]
-    then
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Restarting services... (sudo password may be required)"
-        sudo systemctl restart moonraker
-        sudo systemctl restart klipper
-        echo "Services restarted."
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+            sudo -n systemctl restart moonraker 2>/dev/null || sudo systemctl restart moonraker
+            sudo -n systemctl restart klipper 2>/dev/null || sudo systemctl restart klipper
+            echo "Services restarted."
+        elif [ -x "/etc/init.d/S61moonraker" ]; then
+            if [ "$EUID" -eq 0 ]; then
+                /etc/init.d/S61moonraker restart
+                /etc/init.d/S60klipper restart
+                echo "Services restarted."
+            elif command -v sudo >/dev/null 2>&1; then
+                sudo -n /etc/init.d/S61moonraker restart 2>/dev/null || sudo /etc/init.d/S61moonraker restart
+                sudo -n /etc/init.d/S60klipper restart 2>/dev/null || sudo /etc/init.d/S60klipper restart
+                echo "Services restarted."
+            else
+                echo -e "${YELLOW}Could not restart services automatically (sudo not installed).${NC}"
+                echo "Please log in as root and manually run:"
+                echo "  /etc/init.d/S61moonraker restart"
+                echo "  /etc/init.d/S60klipper restart"
+            fi
+        fi
     else
         echo "Skipping restart."
         echo "Please restart manually to finish cleanup:"
-        echo "sudo systemctl restart moonraker"
-        echo "sudo systemctl restart klipper"
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet init >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+            echo "sudo systemctl restart moonraker"
+            echo "sudo systemctl restart klipper"
+        elif [ -x "/etc/init.d/S61moonraker" ]; then
+            echo "  /etc/init.d/S61moonraker restart"
+            echo "  /etc/init.d/S60klipper restart"
+        fi
     fi
 else
     echo "Running in non-interactive mode."
-    echo "Please restart Klipper and Moonraker manually."
+    echo "Please restart Klipper and Moonraker manually to finish cleanup."
 fi
