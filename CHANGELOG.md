@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.2] - 2026-03-15
+### Fixed
+- **Printer Readiness:** Restored readiness checks using Moonraker `query_objects()` with legacy wrapper fallback to avoid false "printer not ready" on Kalico.
+
 ## [1.2.1] - 2026-03-15
 ### Fixed
 - **Print Monitoring Compatibility:** Align `query_objects()` usage with Moonraker's canonical signature and add a legacy wrapper fallback to prevent “Invalid argument” errors on custom firmwares.

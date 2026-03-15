@@ -571,58 +571,61 @@ class JobManager:
             logging.info("LMNT READY: DEVELOPMENT MODE - Assuming printer is ready for printing")
             return True
         
-        # The code below is the proper implementation based on Moonraker documentation
-        # Uncomment this once we've confirmed the job processing flow works
-        '''
         try:
             # According to Moonraker docs, we should query webhooks, virtual_sdcard, and print_stats
+            logging.info("LMNT READY: Querying printer objects to check status")
+            result = None
+            last_error = None
+            query = {
+                'webhooks': None,
+                'virtual_sdcard': None,
+                'print_stats': None
+            }
             try:
-                logging.info("LMNT READY: Querying printer objects to check status")
-                result = await self.klippy_apis.query_objects({
-                    'objects': {
-                        'webhooks': None,
-                        'virtual_sdcard': None,
-                        'print_stats': None
-                    }
-                })
-                
-                # Check if we got a valid response
-                if not result or 'status' not in result:
-                    logging.info("LMNT READY: Failed to get printer status, printer not ready")
-                    return False
-                
-                # Check if Klippy is ready
-                webhooks = result.get('status', {}).get('webhooks', {})
-                klippy_state = webhooks.get('state', '')
-                logging.info(f"LMNT READY: Klippy state: '{klippy_state}'")
-                
-                if klippy_state != 'ready':
-                    logging.info(f"LMNT READY: Klippy not ready: '{klippy_state}'")
-                    return False
-                
-                # Check if printer is currently printing
-                print_stats = result.get('status', {}).get('print_stats', {})
-                print_state = print_stats.get('state', '')
-                logging.info(f"LMNT READY: Current print_stats state: '{print_state}'")
-                
-                if print_state in ('printing', 'paused'):
-                    logging.info("LMNT READY: Printer is busy (printing or paused)")
-                    return False
-                
-                # If we got here, the printer is ready and not printing
-                logging.info("LMNT READY: Printer is ready for printing")
-                return True
+                result = await self.klippy_apis.query_objects(query)
             except Exception as e:
-                logging.error(f"LMNT READY: Error checking printer status: {str(e)}")
-                import traceback
-                logging.error(f"LMNT READY: Exception traceback: {traceback.format_exc()}")
+                last_error = e
+            if last_error and result is None:
+                try:
+                    result = await self.klippy_apis.query_objects({'objects': query})
+                    last_error = None
+                except Exception as e:
+                    last_error = e
+            if last_error:
+                logging.error(f"LMNT READY: Error checking printer status: {last_error}")
                 return False
+            
+            status = result.get('status', result) if result else None
+            if not status:
+                logging.info("LMNT READY: Failed to get printer status, printer not ready")
+                return False
+            
+            # Check if Klippy is ready
+            webhooks = status.get('webhooks', {})
+            klippy_state = webhooks.get('state', '')
+            logging.info(f"LMNT READY: Klippy state: '{klippy_state}'")
+            
+            if klippy_state != 'ready':
+                logging.info(f"LMNT READY: Klippy not ready: '{klippy_state}'")
+                return False
+            
+            # Check if printer is currently printing
+            print_stats = status.get('print_stats', {})
+            print_state = print_stats.get('state', '')
+            logging.info(f"LMNT READY: Current print_stats state: '{print_state}'")
+            
+            if print_state in ('printing', 'paused'):
+                logging.info("LMNT READY: Printer is busy (printing or paused)")
+                return False
+            
+            # If we got here, the printer is ready and not printing
+            logging.info("LMNT READY: Printer is ready for printing")
+            return True
         except Exception as e:
             logging.error(f"LMNT READY: Error checking printer readiness: {str(e)}")
             import traceback
             logging.error(f"LMNT READY: Exception traceback: {traceback.format_exc()}")
             return False
-        '''
 
     
     async def _download_gcode(self, job):
