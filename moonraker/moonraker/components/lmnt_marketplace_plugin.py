@@ -273,11 +273,18 @@ class LmntMarketplacePlugin:
             printer_name = args.get('printer_name') or self.integration.auth_manager.printer_name or 'Printer'
             manufacturer = args.get('manufacturer') or 'LMNT'
             model = args.get('model') or None
-            result = await self.integration.auth_manager.start_pairing(printer_name, manufacturer, model)
+            # extruder_count: user-specified at registration time (1–4, default 1)
+            try:
+                extruder_count = max(1, min(4, int(args.get('extruder_count', 1) or 1)))
+            except (ValueError, TypeError):
+                extruder_count = 1
+            result = await self.integration.auth_manager.start_pairing(
+                printer_name, manufacturer, model, extruder_count=extruder_count)
             return result
         except Exception as e:
             logging.error(f"[LMNT Marketplace] Error during pair/start: {str(e)}")
             raise self.server.error(str(e), 500)
+
 
     async def _handle_pair_status(self, web_request):
         """Check pairing status with marketplace using session_id."""

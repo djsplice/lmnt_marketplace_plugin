@@ -65,6 +65,15 @@
             <label for="model">Model</label>
             <input type="text" id="model" placeholder="MK4, Ender 3, etc.">
           </div>
+          <div class="card-section">
+            <label for="extruderCount">Number of Toolheads</label>
+            <select id="extruderCount">
+              <option value="1" selected>1 &mdash; Single extruder</option>
+              <option value="2">2 &mdash; Dual extruder</option>
+              <option value="3">3 &mdash; Triple extruder</option>
+              <option value="4">4 &mdash; Quad extruder (e.g. Snapmaker U1)</option>
+            </select>
+          </div>
         </div>
         <div class="card-section card-actions">
           <button id="startBtn">Start Pairing</button>

@@ -443,9 +443,10 @@ class JobManager:
             # Check actual printer state to see if it's really busy
             try:
                 if self.klippy_apis:
-                    result = await self.klippy_apis.query_objects({'print_stats': None})
-                    if result and 'print_stats' in result:
-                        printer_state = result['print_stats'].get('state', 'unknown')
+                    result = await self.klippy_apis.query_objects({'objects': {'print_stats': None}})
+                    status = result.get('status', result)
+                    if status and 'print_stats' in status:
+                        printer_state = status['print_stats'].get('state', 'unknown')
                         logging.info(f"LMNT PROCESS: Current printer state: {printer_state}, current job: {job_id}")
                         
                         # If printer is idle/standby, clear the stale job reference
@@ -565,10 +566,10 @@ class JobManager:
         """Check if printer is ready for a new print job"""
         logging.info("LMNT READY: Checking if printer is ready for printing")
         
-        # For debugging purposes, assume printer is ready
-        # Comment out this section once we've confirmed the job processing flow works
-        logging.info("LMNT READY: DEVELOPMENT MODE - Assuming printer is ready for printing")
-        return True
+        # For debugging purposes, assume printer is ready when development_mode is enabled
+        if self.integration.development_mode:
+            logging.info("LMNT READY: DEVELOPMENT MODE - Assuming printer is ready for printing")
+            return True
         
         # The code below is the proper implementation based on Moonraker documentation
         # Uncomment this once we've confirmed the job processing flow works
@@ -873,64 +874,65 @@ class JobManager:
             self.current_print_job = job
             self.print_job_started = True
             
-            # Read encrypted G-code from memfd
-            memfd_file = os.fdopen(encrypted_memfd, 'rb')
-            encrypted_gcode = memfd_file.read()
-            memfd_file.close()
+            # Direct delegation to print service (replaces redundant localhost HTTP call)
+            logging.info(f"LMNT PRINT: Delegating job {job_id} directly to print service")
+            
+            # Read encrypted G-code from memfd correctly using its value (memfd is the int FD)
+            try:
+                # We use os.fdopen to take ownership and close it later
+                with os.fdopen(encrypted_memfd, 'rb') as f:
+                    encrypted_gcode = f.read()
+            except Exception as e:
+                logging.error(f"LMNT PRINT: Failed to read from memfd for job {job_id}: {e}")
+                await self._update_job_status(job_id, "failed", f"Failed to read encrypted data: {e!r}")
+                self.current_print_job = None
+                self.print_job_started = False
+                return False
 
-            # Send to encrypted_print endpoint
-            logging.info(f"LMNT PRINT: Sending job {job_id} to encrypted_print endpoint")
-            url = "http://localhost:7125/server/encrypted/print"
-            data = {
-                "job_id": job_id,
-                "encrypted_gcode": base64.b64encode(encrypted_gcode).decode("utf-8"),
-                "gcode_dek_package": job.get("gcode_dek_package"),
-                "gcode_iv_hex": job.get("gcode_iv_hex"),
-                "filename": f"virtual_{job_id}_{int(time.time())}.gcode"
-            }
+            # Create PrintJob and delegate to unified print service
+            print_job = PrintJob(
+                job_id=job_id,
+                encrypted_data=encrypted_gcode,
+                dek_package=job.get("gcode_dek_package"),
+                iv_hex=job.get("gcode_iv_hex"),
+                filename=f"virtual_{job_id}_{int(time.time())}.gcode",
+                metadata=job.get('metadata', {})
+            )
 
-            async with self.http_client.post(url, json=data) as response:
+            # Check if print_service is initialized
+            if self.integration.print_service is None:
+                logging.error(f"LMNT PRINT: print_service not initialized for job {job_id}")
+                await self._update_job_status(job_id, "failed", "Print service not initialized")
+                self.current_print_job = None
+                self.print_job_started = False
+                return False
+
+            # Call the service directly
+            try:
+                result = await self.integration.print_service.start_encrypted_print(print_job)
                 elapsed = time.time() - start_time
-                response_text = await response.text()
-                logging.info(
-                    f"LMNT PRINT: Encrypted print endpoint response for job {job_id} - "
-                    f"Status: {response.status}, Elapsed: {elapsed:.2f}s, Body: {response_text}"
-                )
                 
-                if response.status == 200:
-                    try:
-                        response_data = json.loads(response_text)
-                        # Handle nested result structure: {"result": {"status": "ok", ...}}
-                        result = response_data.get('result', response_data)
-                        if result.get('status') == 'ok':
-                            logging.info(
-                                f"LMNT PRINT: Successfully started job {job_id} "
-                                f"in {elapsed:.2f}s, beginning progress monitoring."
-                            )
-                            # Start monitoring for marketplace status reporting
-                            asyncio.create_task(self._monitor_print_progress(job_id))
-                            return True
-                        else:
-                            logging.error(f"LMNT PRINT: Encrypted print endpoint returned error: {response_data}")
-                            await self._update_job_status(job_id, "failed", f"Print start error: {response_data}")
-                            self.current_print_job = None
-                            self.print_job_started = False
-                            return False
-                    except json.JSONDecodeError as e:
-                        logging.error(f"LMNT PRINT: Failed to parse response JSON after {elapsed:.2f}s: {e}")
-                        await self._update_job_status(job_id, "failed", f"Invalid response format: {response_text}")
-                        self.current_print_job = None
-                        self.print_job_started = False
-                        return False
-                else:
-                    logging.error(
-                        f"LMNT PRINT: Failed to start job {job_id} - Status: {response.status}, "
-                        f"Elapsed: {elapsed:.2f}s, Response: {response_text}"
+                if result and result.success:
+                    logging.info(
+                        f"LMNT PRINT: Successfully started job {job_id} "
+                        f"in {elapsed:.2f}s, beginning progress monitoring."
                     )
-                    await self._update_job_status(job_id, "failed", f"HTTP {response.status}: {response_text}")
+                    # Start monitoring for marketplace status reporting
+                    asyncio.create_task(self._monitor_print_progress(job_id))
+                    return True
+                else:
+                    error_msg = result.error_message if result else "Unknown error from print service"
+                    logging.error(f"LMNT PRINT: Print service failed to start job {job_id}: {error_msg}")
+                    await self._update_job_status(job_id, "failed", f"Print service error: {error_msg}")
                     self.current_print_job = None
                     self.print_job_started = False
                     return False
+            except Exception as e:
+                logging.error(f"LMNT PRINT: Exception in start_encrypted_print for job {job_id}: {e}")
+                await self._update_job_status(job_id, "failed", f"Service exception: {e!r}")
+                self.current_print_job = None
+                self.print_job_started = False
+                return False
 
             return True
 
@@ -965,13 +967,45 @@ class JobManager:
                     break
                 
                 # Request print_stats, virtual_sdcard, and display_status
-                result = await self.klippy_apis.query_objects({
+                full_query = {
                     'print_stats': None,
                     'virtual_sdcard': None,
                     'display_status': None
-                })
+                }
+                result = None
+                last_error = None
+                try:
+                    result = await self.klippy_apis.query_objects(full_query)
+                except Exception as e:
+                    last_error = e
+                if last_error and result is None:
+                    try:
+                        result = await self.klippy_apis.query_objects({'objects': full_query})
+                        last_error = None
+                    except Exception as e:
+                        last_error = e
+                if last_error and result is None:
+                    logging.warning(
+                        f"LMNT MONITOR: Full status query failed ({last_error}); retrying with print_stats only"
+                    )
+                    print_stats_query = {'print_stats': None}
+                    result = None
+                    last_error = None
+                    try:
+                        result = await self.klippy_apis.query_objects(print_stats_query)
+                    except Exception as e:
+                        last_error = e
+                    if last_error:
+                        try:
+                            result = await self.klippy_apis.query_objects({'objects': print_stats_query})
+                            last_error = None
+                        except Exception as e:
+                            last_error = e
+                    if last_error:
+                        raise last_error
                 
-                if not result or 'print_stats' not in result:
+                status = result.get('status', result) if result else None
+                if not status or 'print_stats' not in status:
                     consecutive_errors += 1
                     if consecutive_errors >= max_errors:
                         logging.error(f"LMNT MONITOR: Too many API errors, stopping monitoring for job {job_id}")
@@ -980,9 +1014,9 @@ class JobManager:
                     continue
                 
                 consecutive_errors = 0  # Reset error count on success
-                print_stats = result['print_stats']
-                virtual_sdcard = result.get('virtual_sdcard', {})
-                display_status = result.get('display_status', {})
+                print_stats = status['print_stats']
+                virtual_sdcard = status.get('virtual_sdcard', {})
+                display_status = status.get('display_status', {})
                 
                 state = print_stats.get('state', 'unknown')
                 filament_used = print_stats.get('filament_used', 0.0)
@@ -1072,10 +1106,11 @@ class JobManager:
             logging.info(f"LMNT MONITOR: Performing fallback status check for job {job_id}")
             # Try to get current printer status via Klippy APIs
             if self.klippy_apis:
-                result = await self.klippy_apis.query_objects({'print_stats': None})
-                if result and 'print_stats' in result:
-                    state = result['print_stats'].get('state', 'unknown')
-                    progress = result['print_stats'].get('progress', 0) * 100
+                result = await self.klippy_apis.query_objects({'objects': {'print_stats': None}})
+                status = result.get('status', result)
+                if status and 'print_stats' in status:
+                    state = status['print_stats'].get('state', 'unknown')
+                    progress = status['print_stats'].get('progress', 0) * 100
                     logging.info(f"LMNT MONITOR: Fallback status - Job {job_id}: {state} at {progress:.1f}%")
                     
                     if state == 'complete':

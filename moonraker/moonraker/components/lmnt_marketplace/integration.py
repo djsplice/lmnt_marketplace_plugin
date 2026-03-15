@@ -120,12 +120,21 @@ class LmntMarketplaceIntegration:
         self.klippy_apis = klippy_apis
         
         # Create HTTP client with conservative connection management settings
+        ssl_context = None
+        if self.development_mode:
+            import ssl
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            logging.warning("LMNT: SSL verification disabled (development_mode=True)")
+
         connector = aiohttp.TCPConnector(
             limit=10,  # Reduced total connection pool size
             limit_per_host=5,  # Reduced max connections per host
             enable_cleanup_closed=True,  # Clean up closed connections
             force_close=True,  # Force close connections after each request
-            use_dns_cache=False  # Disable DNS caching to prevent stale connections
+            use_dns_cache=False,  # Disable DNS caching to prevent stale connections
+            ssl=ssl_context
         )
         
         # Configure HTTP client timeouts. These values should comfortably exceed

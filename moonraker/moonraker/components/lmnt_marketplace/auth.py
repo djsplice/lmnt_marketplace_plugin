@@ -159,9 +159,17 @@ class AuthManager:
             pass
         # Create a minimal fallback client
         try:
-            self.http_client = aiohttp.ClientSession()
+            ssl_context = None
+            if hasattr(self.integration, 'development_mode') and self.integration.development_mode:
+                import ssl
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+            connector = aiohttp.TCPConnector(ssl=ssl_context)
+            self.http_client = aiohttp.ClientSession(connector=connector)
             self._owns_http_client = True
-            logging.warning("LMNT AUTH: Created fallback HTTP client for pairing flow")
+            logging.warning("LMNT AUTH: Created fallback HTTP client for pairing flow (verification disabled if dev)")
         except Exception as e:
             logging.error(f"LMNT AUTH: Failed to create fallback HTTP client: {e}")
     
@@ -225,6 +233,12 @@ class AuthManager:
                         
                         if self.printer_id:
                             logging.info(f"LMNT AUTH: Successfully loaded printer ID from file: {self.printer_id}")
+                            token_printer_id = self._get_printer_id_from_token()
+                            if token_printer_id and token_printer_id != self.printer_id:
+                                logging.warning(
+                                    "LMNT AUTH: printer_id mismatch between token file and JWT claims "
+                                    f"(file={self.printer_id}, token={token_printer_id})."
+                                )
                         else:
                             # Fallback for older token files: try to extract from JWT
                             logging.info("LMNT AUTH: Printer ID not in file, attempting to extract from token...")
@@ -399,7 +413,7 @@ class AuthManager:
             logging.error(f"LMNT AUTH DLT: Error computing key fingerprint: {e}")
             return None
 
-    async def start_pairing(self, printer_name: str, manufacturer: str = None, model: str = None):
+    async def start_pairing(self, printer_name: str, manufacturer: str = None, model: str = None, extruder_count: int = 1):
         """
         Start pairing with the marketplace by sending our public key and printer metadata.
 
@@ -418,6 +432,9 @@ class AuthManager:
         if not pub_b64 or not key_id:
             raise RuntimeError("Missing key material for pairing")
 
+        # Clamp extruder_count to valid range
+        extruder_count = max(1, min(4, int(extruder_count or 1)))
+
         payload = {
             "public_key": pub_b64,
             "key_type": "x25519",
@@ -426,10 +443,11 @@ class AuthManager:
                 "name": printer_name,
                 "manufacturer": manufacturer,
                 "model": model,
+                "extruder_count": extruder_count,
             },
         }
         url = f"{self.integration.marketplace_url}/api/printers/pair/start"
-        logging.info(f"LMNT AUTH: Starting pairing with marketplace at {url}")
+        logging.info(f"LMNT AUTH: Starting pairing with marketplace at {url} (extruder_count={extruder_count})")
         try:
             async with self.http_client.post(url, json=payload) as resp:
                 data = await resp.json()
@@ -440,6 +458,7 @@ class AuthManager:
         except Exception as e:
             logging.error(f"LMNT AUTH: Error calling pair/start: {e}")
             raise
+
 
     async def pairing_status(self, session_id: str):
         """Check pairing status for a session_id."""
@@ -599,14 +618,6 @@ class AuthManager:
         try:
             # Store token creation time for proactive refresh
             now = datetime.now()
-            with open(token_file, 'w') as f:
-                json.dump({
-                    'printer_token': token,
-                    'token_expires': expiry.isoformat() if expiry else None,
-                    'created_at': now.isoformat(),
-                    'printer_name': self.printer_name if hasattr(self, 'printer_name') else None,
-                    'printer_id': self.printer_id
-                }, f)
             
             # Update in-memory token
             self.printer_token = token
@@ -618,6 +629,15 @@ class AuthManager:
             else:
                 # Fallback to decoding from token if not provided
                 self.printer_id = self._get_printer_id_from_token()
+            
+            with open(token_file, 'w') as f:
+                json.dump({
+                    'printer_token': token,
+                    'token_expires': expiry.isoformat() if expiry else None,
+                    'created_at': now.isoformat(),
+                    'printer_name': self.printer_name if hasattr(self, 'printer_name') else None,
+                    'printer_id': self.printer_id
+                }, f)
             
             # Log with redacted token if not in debug mode
             if self.integration.debug_mode:

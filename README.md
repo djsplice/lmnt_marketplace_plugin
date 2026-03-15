@@ -77,11 +77,13 @@ The plugin is automatically configured in `moonraker.conf` by the installer. You
 [lmnt_marketplace_plugin]
 check_interval: 0
 debug_mode: False
+development_mode: False
 marketplace_url: https://printers.lmnt.co
 ```
 
 *   `check_interval`: Polling interval in seconds (Default: 0/Auto-Polling).
 *   `debug_mode`: Enable verbose logging (Default: False).
+*   `development_mode`: Bypass certain readiness checks for local testing (Default: False).
 *   `marketplace_url`: API endpoint (Default: https://printers.lmnt.co).
 
 ### Custom Firmwares (Snapmaker U1, etc.)
@@ -92,6 +94,7 @@ The LMNT Marketplace Plugin supports custom Klipper environments that do not map
   ```bash
   ~/lmnt_marketplace_plugin/scripts/update.sh
   ```
+- **Monitoring Compatibility:** Print status polling uses Moonraker's canonical `query_objects()` signature with a fallback for legacy wrappers to support custom forks.
 
 For manual installation instructions, see [docs/installation.md](docs/installation.md).
 

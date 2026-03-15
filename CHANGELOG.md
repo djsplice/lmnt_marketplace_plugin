@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.1] - 2026-03-15
+### Fixed
+- **Print Monitoring Compatibility:** Align `query_objects()` usage with Moonraker's canonical signature and add a legacy wrapper fallback to prevent “Invalid argument” errors on custom firmwares.
+- **Mainline Klipper Support:** Added a fallback in `secure_print` to start prints when `virtual_sdcard` lacks Kalico's `gcode_provider` APIs.
+- **Token Consistency:** Ensure printer ID is saved before writing `printer_token.json` and warn when token/ID mismatches are detected.
+
 ## [1.2.0] - 2026-03-13
 ### Added
 - **Custom Firmware Support:** Full compatibility with non-standard Klipper environments like the Snapmaker U1 and `SnapmakerU1-Extended-Firmware`.

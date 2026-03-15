@@ -401,7 +401,8 @@
       const body = {
         printer_name: $('printerName')?.value || 'Printer',
         manufacturer: $('manufacturer')?.value || 'LMNT',
-        model: $('model')?.value || null
+        model: $('model')?.value || null,
+        extruder_count: parseInt($('extruderCount')?.value || '1', 10) || 1
       };
       const res = await postJSON('/machine/lmnt_marketplace/pair/start', body);
       sessionId = (res && (res.session_id || (res.result && res.result.session_id))) || null;

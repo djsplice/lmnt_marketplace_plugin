@@ -178,8 +178,42 @@ class SecurePrint:
             gcmd.respond_raw(f"File opened: {filename} Size: {file_size}")
             gcmd.respond_raw("File selected")
 
-            # Delegate to virtual_sdcard for printing
-            self.virtual_sd.print_with_gcode_provider(provider)
+            # Delegate to virtual_sdcard for printing with workaround for missing method
+            if hasattr(self.virtual_sd, 'print_with_gcode_provider'):
+                self.virtual_sd.print_with_gcode_provider(provider)
+            else:
+                logging.warning("[SecurePrint] 'print_with_gcode_provider' not found. Attempting manual start fallback.")
+                # Manual fallback:
+                # - Kalico: _reset_print + _set_gcode_provider + do_resume
+                # - Mainline: _reset_file + set current_file/file_size/file_position + do_resume
+                try:
+                    if hasattr(self.virtual_sd, '_reset_print'):
+                        self.virtual_sd._reset_print()
+                    elif hasattr(self.virtual_sd, '_reset_file'):
+                        self.virtual_sd._reset_file()
+
+                    if hasattr(self.virtual_sd, '_set_gcode_provider'):
+                        self.virtual_sd._set_gcode_provider(provider)
+                    elif hasattr(self.virtual_sd, 'gcode_provider'):
+                        self.virtual_sd.gcode_provider = provider
+                    elif hasattr(self.virtual_sd, 'current_file'):
+                        self.virtual_sd.current_file = file_handle
+                        self.virtual_sd.file_position = 0
+                        self.virtual_sd.file_size = file_size
+                        if hasattr(self.virtual_sd, 'print_stats'):
+                            self.virtual_sd.print_stats.set_current_file(filename)
+                    else:
+                        raise Exception("Could not find method to set G-code provider on VirtualSD object")
+
+                    if hasattr(self.virtual_sd, 'do_resume'):
+                        self.virtual_sd.do_resume()
+                    else:
+                        raise Exception("Could not find 'do_resume' on VirtualSD object")
+
+                    logging.info("[SecurePrint] Manual start fallback successful.")
+                except Exception as fallback_e:
+                    logging.error(f"[SecurePrint] Manual start fallback failed: {fallback_e}")
+                    raise Exception(f"Failed to start print via fallback: {fallback_e}")
         except Exception as e:
             logging.exception("SET_GCODE_FD: Error setting file handle")
             raise gcmd.error(f"Failed to set G-code FD: {str(e)}")

@@ -204,17 +204,13 @@ class UnifiedPrintService:
     
     async def _parse_metadata_from_memfd(self, memfd: int, existing_metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Parse metadata from memfd using seek operations (no duplication)
-        
-        Args:
-            memfd: File descriptor to read from
-            existing_metadata: Any existing metadata to merge
-            
-        Returns:
-            Combined metadata dictionary
+        Parse metadata from memfd using seek operations.
+        Offloads blocking I/O to a background thread to prevent Klipper watchdog issues.
         """
+        return await asyncio.to_thread(self._parse_metadata_sync, memfd, existing_metadata)
+
+    def _parse_metadata_sync(self, memfd: int, existing_metadata: Dict[str, Any]) -> Dict[str, Any]:
         metadata = existing_metadata.copy()
-        
         try:
             # Save current position
             current_pos = os.lseek(memfd, 0, os.SEEK_CUR)
@@ -225,6 +221,7 @@ class UnifiedPrintService:
             
             # Read last 1MB (Footer)
             try:
+                # Use a separate file descriptor logic in thread
                 file_size = os.lseek(memfd, 0, os.SEEK_END)
                 footer_start = max(0, file_size - 1024 * 1024)
                 os.lseek(memfd, footer_start, os.SEEK_SET)
@@ -248,7 +245,7 @@ class UnifiedPrintService:
             return metadata
             
         except Exception as e:
-            logging.error(f"[PrintService] Error parsing metadata: {e}")
+            logging.error(f"[PrintService] Error in sync metadata parse: {e}")
             return metadata
     
     async def _extract_layer_count_from_memfd(self, memfd: int) -> int:
@@ -299,7 +296,13 @@ class UnifiedPrintService:
 
             # Get Moonraker PID for registration
             moonraker_pid = os.getpid()
-            virtual_filename = f"virtual_{filename}"
+            
+            # Strip virtual_ if already present to prevent double prefixing
+            clean_filename = filename
+            if clean_filename.startswith("virtual_"):
+                clean_filename = clean_filename[len("virtual_"):]
+            
+            virtual_filename = f"virtual_{clean_filename}"
 
             # 1. Register the encrypted file with Klipper
             register_cmd = f'REGISTER_ENCRYPTED_FILE FILENAME="{virtual_filename}" PID={moonraker_pid} FD={memfd}'
@@ -334,13 +337,14 @@ class UnifiedPrintService:
                 except Exception as e:
                     logging.warning(f"[PrintService] Failed to set TOTAL_LAYER: {e}")
 
-            # 4. Start the print
+            # 4. Start the print using SET_GCODE_FD directly
+            # This bypasses the need for the SDCARD_PRINT_FILE macro override
             try:
                 await self.klippy_apis.run_gcode(
-                    f"SDCARD_PRINT_FILE FILENAME={virtual_filename}"
+                    f"SET_GCODE_FD FILENAME={virtual_filename}"
                 )
             except Exception as e:
-                logging.error(f"[PrintService] Failed SDCARD_PRINT_FILE: {e}")
+                logging.error(f"[PrintService] Failed SET_GCODE_FD: {e}")
                 raise Exception(f"Klipper start failed: {e}")
 
             logging.info(f"[PrintService] Successfully started Klipper print: {virtual_filename}")
