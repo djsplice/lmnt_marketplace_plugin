@@ -78,13 +78,15 @@ The plugin is automatically configured in `moonraker.conf` by the installer. You
 check_interval: 0
 debug_mode: False
 development_mode: False
-marketplace_url: https://printers.lmnt.co
+marketplace_url: https://api.lmnt.co
+firebase_project_id: lmnt-prod
 ```
 
 *   `check_interval`: Polling interval in seconds (Default: 0/Auto-Polling).
 *   `debug_mode`: Enable verbose logging (Default: False).
 *   `development_mode`: Bypass certain readiness checks for local testing (Default: False).
-*   `marketplace_url`: API endpoint (Default: https://printers.lmnt.co).
+*   `marketplace_url`: API endpoint (Default: https://api.lmnt.co).
+*   `firebase_project_id`: Signaling for print job availability (Default: lmnt-prod)
 
 ### Custom Firmwares (Snapmaker U1, etc.)
 The LMNT Marketplace Plugin supports custom Klipper environments that do not map to traditional installation paradigms (e.g. `SysVinit` instead of `systemd`, or missing virtual environments). 
