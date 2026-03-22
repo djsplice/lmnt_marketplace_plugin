@@ -23,6 +23,18 @@ Run the following command on your printer via SSH:
 cd ~ && git clone https://github.com/djsplice/lmnt_marketplace_plugin.git && ./lmnt_marketplace_plugin/scripts/install.sh
 ```
 
+If your printer doesn't have `git` installed:
+```bash
+cd ~
+curl -L https://github.com/djsplice/lmnt_marketplace_plugin/archive/refs/heads/main.tar.gz -o lmnt_marketplace_plugin-main.tar.gz
+rm -rf lmnt_marketplace_plugin-main
+tar -xzf lmnt_marketplace_plugin-main.tar.gz
+rm -rf lmnt_marketplace_plugin
+mv lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+~/lmnt_marketplace_plugin/scripts/install.sh
+```
+
+
 ### 2. Configure Klipper
 
 Add the following sections to your `printer.cfg` file to enable the encryption bridge and G-code macros:
