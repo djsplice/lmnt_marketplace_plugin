@@ -87,10 +87,10 @@ class UnifiedPrintService:
                 )
             
             # Parse metadata using the same memfd (no duplication)
-            metadata = await self._parse_metadata_from_memfd(memfd, print_job.metadata)
+            metadata = await self._parse_metadata_from_memfd(memfd, print_job.metadata, print_job.filename)
             
             # Extract layer count using the same memfd (no duplication)
-            layer_count = await self._extract_layer_count_from_memfd(memfd)
+            layer_count = await self._extract_layer_count_from_memfd(memfd, print_job.filename)
             metadata['layer_count'] = layer_count
             
             # Start the print using the same memfd
@@ -137,10 +137,10 @@ class UnifiedPrintService:
         
         try:
             # Parse metadata using the decrypted memfd
-            metadata = await self._parse_metadata_from_memfd(decrypted_memfd, {})
+            metadata = await self._parse_metadata_from_memfd(decrypted_memfd, {}, filename)
             
             # Extract layer count using the decrypted memfd
-            layer_count = await self._extract_layer_count_from_memfd(decrypted_memfd)
+            layer_count = await self._extract_layer_count_from_memfd(decrypted_memfd, filename)
             metadata['layer_count'] = layer_count
             
             # Start the print using the decrypted memfd
@@ -202,14 +202,14 @@ class UnifiedPrintService:
             logging.error(f"[PrintService] Decryption error for job {print_job.job_id}: {e}")
             return None
     
-    async def _parse_metadata_from_memfd(self, memfd: int, existing_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    async def _parse_metadata_from_memfd(self, memfd: int, existing_metadata: Dict[str, Any], filename: str = None) -> Dict[str, Any]:
         """
         Parse metadata from memfd using seek operations.
         Offloads blocking I/O to a background thread to prevent Klipper watchdog issues.
         """
-        return await asyncio.to_thread(self._parse_metadata_sync, memfd, existing_metadata)
+        return await asyncio.to_thread(self._parse_metadata_sync, memfd, existing_metadata, filename)
 
-    def _parse_metadata_sync(self, memfd: int, existing_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_metadata_sync(self, memfd: int, existing_metadata: Dict[str, Any], filename: str = None) -> Dict[str, Any]:
         metadata = existing_metadata.copy()
         try:
             # Save current position
@@ -241,6 +241,90 @@ class UnifiedPrintService:
             # Merge parsed metadata (update existing)
             metadata.update(parsed_metadata)
             
+            # Ensure "size" and "modified" exist so KlipperScreen/Mainsail
+            # treat this virtual print job as a fully valid entry in their UI logic.
+            try:
+                gcode_size = os.fstat(memfd).st_size
+                metadata['size'] = gcode_size
+                metadata['modified'] = time.time()
+            except Exception as e:
+                logging.warning(f"[PrintService] Could not extract memfd file size: {e}")
+            
+            # --- Thumbnail Extraction for Virtual Files ---
+            if filename and self.file_manager:
+                try:
+                    gcodes_path = None
+                    if hasattr(self.file_manager, "get_directory"):
+                        gcodes_path = self.file_manager.get_directory("gcodes")
+                    elif hasattr(self.integration.server, "get_app_args"):
+                        data_path = self.integration.server.get_app_args().get('data_path', '')
+                        if data_path:
+                            gcodes_path = os.path.join(data_path, "gcodes")
+                            
+                    if gcodes_path:
+                        # Find thumbnail sections
+                        thumbnails = []
+                        lines = header_content.splitlines()
+                        
+                        clean_filename = filename[len("virtual_"):] if filename.startswith("virtual_") else filename
+                        virtual_filename = f"virtual_{clean_filename}"
+                        
+                        # Thumbnails natively live in <gcodes>/.thumbs/
+                        thumbs_dir = os.path.join(gcodes_path, ".thumbs")
+                        
+                        base_name = virtual_filename
+                        if base_name.lower().endswith(".gcode"):
+                            base_name = base_name[:-6]
+                        
+                        i = 0
+                        while i < len(lines):
+                            line = lines[i].strip()
+                            if line.startswith('; thumbnail begin'):
+                                try:
+                                    parts = line.split()
+                                    dimensions = parts[3].split('x')
+                                    width = int(dimensions[0])
+                                    height = int(dimensions[1])
+                                    size = int(parts[4]) if len(parts) > 4 else 0
+                                    
+                                    base64_data = ""
+                                    i += 1
+                                    while i < len(lines) and not lines[i].strip().startswith('; thumbnail end'):
+                                        if lines[i].strip().startswith(';'):
+                                            # remove leading ;
+                                            b64_line = lines[i].strip()[1:].strip()
+                                            base64_data += b64_line
+                                        i += 1
+                                        
+                                    if base64_data:
+                                        import base64
+                                        image_data = base64.b64decode(base64_data)
+                                        os.makedirs(thumbs_dir, exist_ok=True)
+                                        
+                                        thumb_filename = f"{base_name}-{width}x{height}.png"
+                                        thumb_filepath = os.path.join(thumbs_dir, thumb_filename)
+                                        
+                                        with open(thumb_filepath, 'wb') as f:
+                                            f.write(image_data)
+                                            
+                                        rel_path = f".thumbs/{thumb_filename}"
+                                        thumbnails.append({
+                                            'width': width,
+                                            'height': height,
+                                            'size': len(image_data),
+                                            'relative_path': rel_path
+                                        })
+                                        logging.info(f"[PrintService] Extracted virtual thumbnail: {rel_path}")
+                                except Exception as e:
+                                    logging.error(f"[PrintService] Error parsing thumbnail metadata: {e}")
+                            i += 1
+                            
+                        if thumbnails:
+                            metadata['thumbnails'] = thumbnails
+                            
+                except Exception as e:
+                    logging.error(f"[PrintService] Error extracting thumbnails from memfd: {e}")
+                    
             logging.info(f"[PrintService] Parsed metadata: {metadata}")
             return metadata
             
@@ -248,19 +332,20 @@ class UnifiedPrintService:
             logging.error(f"[PrintService] Error in sync metadata parse: {e}")
             return metadata
     
-    async def _extract_layer_count_from_memfd(self, memfd: int) -> int:
+    async def _extract_layer_count_from_memfd(self, memfd: int, filename: str = None) -> int:
         """
         Extract layer count from memfd using seek operations (no duplication)
         
         Args:
             memfd: File descriptor to read from
+            filename: Virtual filename for the print
             
         Returns:
             Layer count or 0 if not found
         """
         try:
             # Reuse _parse_metadata_from_memfd to get layer count
-            metadata = await self._parse_metadata_from_memfd(memfd, {})
+            metadata = await self._parse_metadata_from_memfd(memfd, {}, filename)
             layer_count = metadata.get('layer_count', 0)
             
             if layer_count > 0:
@@ -323,6 +408,19 @@ class UnifiedPrintService:
                     gcode_metadata.insert(virtual_filename, metadata)
                     # Announce file creation to UI
                     self.file_manager._sched_changed_event("create", "gcodes", virtual_filename, immediate=True)
+                    
+                    try:
+                        md_payload = metadata.copy()
+                        md_payload['filename'] = virtual_filename
+                        md_payload['job_id'] = None
+                        
+                        # Tell UI that metadata has successfully parsed instantly
+                        self.server.send_event("file_manager:metadata_parsed", md_payload)
+                        
+                        logging.info(f"[PrintService] Metadata broadcast event for: {virtual_filename}")
+                    except Exception as e:
+                        logging.warning(f"[PrintService] Metadata broadcast failure: {e}")
+                            
                 except Exception as e:
                     logging.warning(f"[PrintService] Failed to persist metadata for {virtual_filename}: {e}")
                 else:

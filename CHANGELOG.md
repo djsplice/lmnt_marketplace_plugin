@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.4] - 2026-03-26
+### Added
+- **Virtual Thumbnail Extraction**: Implemented real-time in-memory G-code header interception to extract model thumbnails from virtual `memfd` print jobs.
+
+## [1.2.3] - 2026-03-25
+### Fixed
+- **Installer Robustness**: Improved Snapmaker U1 install and update workflows with better service restart handling.
+
 ## [1.2.2] - 2026-03-15
 ### Fixed
 - **Printer Readiness:** Restored readiness checks using Moonraker `query_objects()` with legacy wrapper fallback to avoid false "printer not ready" on Kalico.
