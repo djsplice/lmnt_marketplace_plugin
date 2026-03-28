@@ -71,6 +71,7 @@ class UnifiedPrintService:
 
     def __init__(self, integration):
         self.integration = integration
+        self.server = integration.server
         self.crypto_manager = integration.crypto_manager
         self.klippy_apis = None
         self.file_manager = None
