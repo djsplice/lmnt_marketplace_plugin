@@ -46,8 +46,28 @@ class UnifiedPrintService:
     service that both jobs.py and encrypted_print.py can use.
     """
     
-    # Path to the compiled lmnt_decrypt Go binary, relative to this file.
-    _HELPER_BINARY = Path(__file__).parent.parent.parent.parent.parent / "bin" / "lmnt_decrypt"
+    @property
+    def _helper_binary(self) -> Path:
+        """
+        Robustly detect the helper binary path.
+        Checks multiple possible locations to handle different installation layouts.
+        """
+        # 1. Try relative to this file's real path (handles symlinks)
+        # moonraker/moonraker/components/lmnt_marketplace/print_service.py -> ../../../../bin/
+        path_relative = Path(__file__).resolve().parent.parent.parent.parent.parent / "bin" / "lmnt_decrypt"
+        if path_relative.exists():
+            return path_relative
+            
+        # 2. Try relative to the plugin root (if we are in a symlinked component)
+        current = Path(__file__).resolve().parent
+        for _ in range(6):
+            if (current / "bin" / "lmnt_decrypt").exists():
+                return current / "bin" / "lmnt_decrypt"
+            current = current.parent
+            
+        # 3. Fallback to hardcoded home directory path (Snapmaker default)
+        fallback = Path.home() / "lmnt_marketplace_plugin" / "bin" / "lmnt_decrypt"
+        return fallback
 
     def __init__(self, integration):
         self.integration = integration
@@ -187,65 +207,70 @@ class UnifiedPrintService:
         Returns:
             memfd file descriptor (int) or None if the helper binary failed.
         """
-        binary = self._HELPER_BINARY
+        binary = self._helper_binary
         if not binary.exists():
-            logging.error(
-                f"[PrintService] lmnt_decrypt binary not found at {binary}. "
-                "Run install.sh to fetch the correct binary for this architecture."
-            )
+            logging.error(f"[PrintService] lmnt_decrypt binary not found at {binary}. Run install.sh.")
             return None
 
         # Extract the raw 32-byte private key from the in-memory NaCl key object
-        # and pass it to the binary as hex — no key material ever touches disk.
         nacl_key = self.integration.crypto_manager.dlt_private_key_ed25519
         if nacl_key is None:
-            logging.error("[PrintService] Printer private key not loaded — cannot launch lmnt_decrypt")
+            logging.error("[PrintService] Printer private key not loaded.")
             return None
         key_hex = bytes(nacl_key).hex()
 
-        api_url = self.integration.config.get('marketplace_url', 'https://api.lmnt.co')
-
+        # Build command for 'Pure Filter' mode (no API calls in Go)
         cmd = [
             str(binary),
             "--job-id", print_job.job_id,
             "--key-hex", key_hex,
-            "--api-url", api_url,
+            "--dek-package", print_job.dek_package,
+            "--iv-hex", print_job.iv_hex,
         ]
 
         try:
-            proc = await asyncio.to_thread(
-                lambda: subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+            logging.info(f"[PrintService] Launching lmnt_decrypt filter for job {print_job.job_id}...")
+            
+            # Start process with pipes for stdin/stdout
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
             )
 
+            # Pipe the encrypted data to the helper's stdin in a background thread
+            def pipe_data():
+                try:
+                    proc.stdin.buffer.write(print_job.encrypted_data)
+                    proc.stdin.buffer.flush()
+                    proc.stdin.buffer.close()
+                except Exception as e:
+                    logging.error(f"[PrintService] Helper pipe error: {e}")
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, pipe_data)
+
             # Read the fd path from the first line of stdout (e.g. "/proc/self/fd/7")
-            fd_path = await asyncio.to_thread(lambda: proc.stdout.readline().strip())
+            fd_path_str = await loop.run_in_executor(None, proc.stdout.readline)
+            fd_path = fd_path_str.strip()
 
             if not fd_path or not fd_path.startswith("/proc/"):
-                stderr_out = await asyncio.to_thread(proc.stderr.read)
-                logging.error(
-                    f"[PrintService] Helper binary produced unexpected output for job "
-                    f"{print_job.job_id}: stdout={fd_path!r} stderr={stderr_out}"
-                )
+                stderr_out = await loop.run_in_executor(None, proc.stderr.read)
+                logging.error(f"[PrintService] Helper failed: stderr={stderr_out}")
                 proc.kill()
                 return None
 
-            # Re-open the fd through /proc/<pid>/fd/<n> in our own process so we
-            # own the file descriptor independently of the helper's lifecycle.
+            # Re-open the fd through /proc/<pid>/fd/<n> in our own process
             helper_pid = proc.pid
             our_fd_path = fd_path.replace("/proc/self/", f"/proc/{helper_pid}/")
             memfd = os.open(our_fd_path, os.O_RDWR)
 
             # Keep the helper process alive so its memfd stays open.
             self._helper_procs[print_job.job_id] = proc
-            logging.info(
-                f"[PrintService] lmnt_decrypt helper running (pid={helper_pid}), "
-                f"memfd={memfd} for job {print_job.job_id}"
-            )
+            logging.info(f"[PrintService] Decryption successful. memfd={memfd} (pid={helper_pid})")
             return memfd
 
         except Exception as e:
