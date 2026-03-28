@@ -245,3 +245,13 @@ class LmntMarketplaceIntegration:
         except Exception as e:
             logging.warning(f"LMNT: Could not set secure permissions: {e}")
             # Continue anyway - permissions are a security enhancement, not critical for functionality
+
+    def get_private_key_path(self) -> str:
+        """
+        Returns the absolute path to the printer's Curve25519 private key file.
+
+        This key is generated during printer registration and stored in the
+        lmnt_marketplace/keys/ directory. The lmnt_decrypt Go helper binary
+        reads this file directly to perform NaCl Box DEK decryption.
+        """
+        return os.path.join(self.keys_path, "dlt_private_key.bin")

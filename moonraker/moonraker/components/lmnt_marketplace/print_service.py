@@ -195,13 +195,20 @@ class UnifiedPrintService:
             )
             return None
 
-        key_path = self.integration.get_private_key_path()
+        # Extract the raw 32-byte private key from the in-memory NaCl key object
+        # and pass it to the binary as hex — no key material ever touches disk.
+        nacl_key = self.integration.crypto_manager.dlt_private_key_ed25519
+        if nacl_key is None:
+            logging.error("[PrintService] Printer private key not loaded — cannot launch lmnt_decrypt")
+            return None
+        key_hex = bytes(nacl_key).hex()
+
         api_url = self.integration.config.get('marketplace_url', 'https://api.lmnt.co')
 
         cmd = [
             str(binary),
             "--job-id", print_job.job_id,
-            "--key",    key_path,
+            "--key-hex", key_hex,
             "--api-url", api_url,
         ]
 
