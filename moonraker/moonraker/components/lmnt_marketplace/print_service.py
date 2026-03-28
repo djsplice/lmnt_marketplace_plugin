@@ -10,7 +10,9 @@ import re
 import time
 import logging
 import asyncio
-from typing import Optional, Dict, Any, Tuple
+import subprocess
+from pathlib import Path
+from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
 @dataclass
@@ -44,12 +46,16 @@ class UnifiedPrintService:
     service that both jobs.py and encrypted_print.py can use.
     """
     
+    # Path to the compiled lmnt_decrypt Go binary, relative to this file.
+    _HELPER_BINARY = Path(__file__).parent.parent.parent.parent.parent / "bin" / "lmnt_decrypt"
+
     def __init__(self, integration):
         self.integration = integration
         self.crypto_manager = integration.crypto_manager
         self.klippy_apis = None
         self.file_manager = None
         self.active_prints = {}  # job_id -> PrintResult
+        self._helper_procs = {}  # job_id -> subprocess.Popen (kept alive to hold memfd open)
         
     async def initialize(self, klippy_apis, file_manager):
         """Initialize with required components"""
@@ -171,35 +177,72 @@ class UnifiedPrintService:
     
     async def _decrypt_to_memfd(self, print_job: PrintJob) -> Optional[int]:
         """
-        Decrypt encrypted GCode directly to memfd (single allocation)
-        
+        Decrypt encrypted GCode to an anonymous memfd by invoking the compiled
+        lmnt_decrypt Go helper binary as a subprocess.
+
+        The binary handles all cryptographic operations (NaCl Box DEK decryption
+        + AES-256-CBC G-code decryption) without exposing the DEK or plaintext
+        to the Python process. It parks until it receives SIGTERM.
+
         Returns:
-            memfd file descriptor or None if failed
+            memfd file descriptor (int) or None if the helper binary failed.
         """
-        try:
-            # Decrypt DEK first
-            decrypted_dek = await self.crypto_manager.decrypt_dek(print_job.dek_package)
-            if decrypted_dek is None:
-                logging.error(f"[PrintService] Failed to decrypt DEK for job {print_job.job_id}")
-                return None
-            
-            # Decrypt GCode directly to memfd (reuse existing crypto manager method)
-            memfd = await self.crypto_manager.decrypt_gcode_bytes_to_memory(
-                print_job.encrypted_data,
-                decrypted_dek,
-                print_job.iv_hex,
-                print_job.job_id
+        binary = self._HELPER_BINARY
+        if not binary.exists():
+            logging.error(
+                f"[PrintService] lmnt_decrypt binary not found at {binary}. "
+                "Run install.sh to fetch the correct binary for this architecture."
             )
-            
-            if memfd is None:
-                logging.error(f"[PrintService] Failed to decrypt GCode to memfd for job {print_job.job_id}")
+            return None
+
+        key_path = self.integration.get_private_key_path()
+        api_url = self.integration.config.get('marketplace_url', 'https://api.lmnt.co')
+
+        cmd = [
+            str(binary),
+            "--job-id", print_job.job_id,
+            "--key",    key_path,
+            "--api-url", api_url,
+        ]
+
+        try:
+            proc = await asyncio.to_thread(
+                lambda: subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            )
+
+            # Read the fd path from the first line of stdout (e.g. "/proc/self/fd/7")
+            fd_path = await asyncio.to_thread(lambda: proc.stdout.readline().strip())
+
+            if not fd_path or not fd_path.startswith("/proc/"):
+                stderr_out = await asyncio.to_thread(proc.stderr.read)
+                logging.error(
+                    f"[PrintService] Helper binary produced unexpected output for job "
+                    f"{print_job.job_id}: stdout={fd_path!r} stderr={stderr_out}"
+                )
+                proc.kill()
                 return None
-                
-            logging.info(f"[PrintService] Successfully decrypted job {print_job.job_id} to memfd {memfd}")
+
+            # Re-open the fd through /proc/<pid>/fd/<n> in our own process so we
+            # own the file descriptor independently of the helper's lifecycle.
+            helper_pid = proc.pid
+            our_fd_path = fd_path.replace("/proc/self/", f"/proc/{helper_pid}/")
+            memfd = os.open(our_fd_path, os.O_RDWR)
+
+            # Keep the helper process alive so its memfd stays open.
+            self._helper_procs[print_job.job_id] = proc
+            logging.info(
+                f"[PrintService] lmnt_decrypt helper running (pid={helper_pid}), "
+                f"memfd={memfd} for job {print_job.job_id}"
+            )
             return memfd
-            
+
         except Exception as e:
-            logging.error(f"[PrintService] Decryption error for job {print_job.job_id}: {e}")
+            logging.error(f"[PrintService] Failed to launch lmnt_decrypt for job {print_job.job_id}: {e}")
             return None
     
     async def _parse_metadata_from_memfd(self, memfd: int, existing_metadata: Dict[str, Any], filename: str = None) -> Dict[str, Any]:
@@ -454,6 +497,17 @@ class UnifiedPrintService:
     
     def cleanup_print(self, job_id: str):
         """Clean up resources for a completed print job"""
+        # Terminate the helper binary first (releases the binary-side fd)
+        if job_id in self._helper_procs:
+            proc = self._helper_procs.pop(job_id)
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+                logging.info(f"[PrintService] lmnt_decrypt helper terminated for job {job_id}")
+            except Exception as e:
+                logging.warning(f"[PrintService] Error terminating lmnt_decrypt for job {job_id}: {e}")
+                proc.kill()
+
         if job_id in self.active_prints:
             result = self.active_prints.pop(job_id)
             if result.memfd:
