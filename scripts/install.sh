@@ -98,37 +98,33 @@ if [ -d "${REPO_DIR}/moonraker/moonraker/components/ui" ]; then
 fi
 
 # -------------------------------------------------------------------------
-# DOWNLOAD lmnt_decrypt HELPER BINARY
+# CONFIGURE lmnt_decrypt HELPER BINARY
 # -------------------------------------------------------------------------
-BINARY_DIR="${REPO_DIR}/bin"
-mkdir -p "${BINARY_DIR}"
-
+BINARY_ROOT="${REPO_DIR}/bin"
 ARCH=$(uname -m)
+
 case "${ARCH}" in
-    aarch64|arm64)  BINARY_NAME="lmnt_decrypt_aarch64" ;;
-    armv7l|armv7)   BINARY_NAME="lmnt_decrypt_armv7"   ;;
-    x86_64|amd64)   BINARY_NAME="lmnt_decrypt_x86_64"  ;;
+    aarch64|arm64)  SOURCE_BINARY="${BINARY_ROOT}/lmnt_decrypt_aarch64" ;;
+    armv7l|armv7)   SOURCE_BINARY="${BINARY_ROOT}/lmnt_decrypt_armv7"   ;;
+    x86_64|amd64)   SOURCE_BINARY="${BINARY_ROOT}/lmnt_decrypt_x86_64"  ;;
     *)
         echo "WARNING: Unsupported architecture '${ARCH}'. The lmnt_decrypt helper binary may not be available."
-        echo "Please open an issue at https://github.com/djsplice/lmnt_marketplace_plugin/issues"
-        BINARY_NAME=""
+        SOURCE_BINARY=""
         ;;
 esac
 
-if [ -n "${BINARY_NAME}" ]; then
-    BINARY_PATH="${BINARY_DIR}/lmnt_decrypt"
-    HELPER_RELEASES_URL="https://github.com/djsplice/lmnt_marketplace_plugin_helper/releases/latest/download"
-    BINARY_URL="${HELPER_RELEASES_URL}/${BINARY_NAME}"
-
-    echo "Downloading lmnt_decrypt helper binary for ${ARCH} from ${BINARY_URL}..."
-    if curl -fsSL "${BINARY_URL}" -o "${BINARY_PATH}"; then
-        chmod +x "${BINARY_PATH}"
-        echo "lmnt_decrypt helper binary installed at ${BINARY_PATH}"
+if [ -n "${SOURCE_BINARY}" ]; then
+    BINARY_PATH="${BINARY_ROOT}/lmnt_decrypt"
+    
+    if [ -f "${SOURCE_BINARY}" ]; then
+        echo "Configuring lmnt_decrypt helper binary for ${ARCH}..."
+        chmod +x "${SOURCE_BINARY}"
+        # Create a stable symlink 'lmnt_decrypt' -> 'lmnt_decrypt_<arch>'
+        ln -sf "${SOURCE_BINARY}" "${BINARY_PATH}"
+        echo "lmnt_decrypt helper binary configured at ${BINARY_PATH}"
     else
-        echo "WARNING: Failed to download lmnt_decrypt binary. Encrypted G-code decryption will not be available until the binary is installed."
-        echo "You can manually download '${BINARY_NAME}' from:"
-        echo "  ${HELPER_RELEASES_URL}"
-        echo "And place it at: ${BINARY_PATH}"
+        echo "ERROR: lmnt_decrypt binary not found for architecture '${ARCH}' at ${SOURCE_BINARY}."
+        echo "Please ensure the repository was cloned correctly or run 'git pull'."
     fi
 fi
 # -------------------------------------------------------------------------
