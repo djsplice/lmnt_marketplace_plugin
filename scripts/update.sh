@@ -62,6 +62,38 @@ fi
 echo "Installing dependencies..."
 "${VENV_DIR}/bin/pip" install --disable-pip-version-check -r "${REPO_DIR}/requirements.txt"
 
+# -------------------------------------------------------------------------
+# CONFIGURE lmnt_decrypt HELPER BINARY
+# -------------------------------------------------------------------------
+BINARY_ROOT="${REPO_DIR}/bin"
+ARCH=$(uname -m)
+
+case "${ARCH}" in
+    aarch64|arm64)  SOURCE_BINARY="${BINARY_ROOT}/lmnt_decrypt_aarch64" ;;
+    armv7l|armv7)   SOURCE_BINARY="${BINARY_ROOT}/lmnt_decrypt_armv7"   ;;
+    x86_64|amd64)   SOURCE_BINARY="${BINARY_ROOT}/lmnt_decrypt_x86_64"  ;;
+    *)
+        echo "WARNING: Unsupported architecture '${ARCH}'. The lmnt_decrypt helper binary may not be available."
+        SOURCE_BINARY=""
+        ;;
+esac
+
+if [ -n "${SOURCE_BINARY}" ]; then
+    BINARY_PATH="${BINARY_ROOT}/lmnt_decrypt"
+    
+    if [ -f "${SOURCE_BINARY}" ]; then
+        echo "Configuring lmnt_decrypt helper binary for ${ARCH}..."
+        chmod +x "${SOURCE_BINARY}"
+        # Create a stable symlink 'lmnt_decrypt' -> 'lmnt_decrypt_<arch>'
+        ln -sf "${SOURCE_BINARY}" "${BINARY_PATH}"
+        echo "lmnt_decrypt helper binary configured at ${BINARY_PATH}"
+    else
+        echo "ERROR: lmnt_decrypt binary not found for architecture '${ARCH}' at ${SOURCE_BINARY}."
+        echo "Please ensure the repository was cloned correctly or run 'git pull'."
+    fi
+fi
+# -------------------------------------------------------------------------
+
 echo "Refreshing Moonraker components..."
 rm -rf "${COMPONENT_DIR}/lmnt_marketplace"
 rm -rf "${COMPONENT_DIR}/lmnt_marketplace_plugin.py"
