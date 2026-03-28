@@ -1,0 +1,555 @@
+"""
+LMNT Marketplace Unified Print Service
+
+Consolidates encrypted print logic to eliminate multiple memfd allocations
+and provide a single, efficient service for both jobs.py and encrypted_print.py
+"""
+
+import os
+import re
+import time
+import logging
+import asyncio
+import subprocess
+from pathlib import Path
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class PrintJob:
+    """Represents a print job with all necessary data"""
+    job_id: str
+    encrypted_data: bytes
+    dek_package: str
+    iv_hex: str
+    filename: str
+    metadata: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+
+@dataclass
+class PrintResult:
+    """Result of a print operation"""
+    success: bool
+    memfd: Optional[int] = None
+    metadata: Dict[str, Any] = None
+    error_message: Optional[str] = None
+    layer_count: int = 0
+
+class UnifiedPrintService:
+    """
+    Unified service for encrypted print operations
+    
+    Eliminates multiple memfd allocations by providing a single
+    service that both jobs.py and encrypted_print.py can use.
+    """
+    
+    @property
+    def _helper_binary(self) -> Path:
+        """
+        Robustly detect the helper binary path.
+        Checks multiple possible locations to handle different installation layouts.
+        """
+        # 1. Try relative to this file's real path (handles symlinks)
+        # moonraker/moonraker/components/lmnt_marketplace/print_service.py -> ../../../../bin/
+        path_relative = Path(__file__).resolve().parent.parent.parent.parent.parent / "bin" / "lmnt_decrypt"
+        if path_relative.exists():
+            return path_relative
+            
+        # 2. Try relative to the plugin root (if we are in a symlinked component)
+        current = Path(__file__).resolve().parent
+        for _ in range(6):
+            if (current / "bin" / "lmnt_decrypt").exists():
+                return current / "bin" / "lmnt_decrypt"
+            current = current.parent
+            
+        # 3. Fallback to hardcoded home directory path (Snapmaker default)
+        fallback = Path.home() / "lmnt_marketplace_plugin" / "bin" / "lmnt_decrypt"
+        return fallback
+
+    def __init__(self, integration):
+        self.integration = integration
+        self.server = integration.server
+        self.crypto_manager = integration.crypto_manager
+        self.klippy_apis = None
+        self.file_manager = None
+        self.active_prints = {}  # job_id -> PrintResult
+        self._helper_procs = {}  # job_id -> subprocess.Popen (kept alive to hold memfd open)
+        
+    async def initialize(self, klippy_apis, file_manager):
+        """Initialize with required components"""
+        self.klippy_apis = klippy_apis
+        self.file_manager = file_manager
+
+    async def handle_klippy_shutdown(self):
+        """
+        Handle Klippy shutdown event
+        """
+        logging.info("LMNT PRINT SERVICE: Handling Klippy shutdown")
+        self.klippy_apis = None
+        self.file_manager = None
+        
+    async def start_encrypted_print(self, print_job: PrintJob) -> PrintResult:
+        """
+        Start an encrypted print job with single memfd allocation
+        
+        Args:
+            print_job: PrintJob containing all necessary data
+            
+        Returns:
+            PrintResult with success status and memfd if successful
+        """
+        job_id = print_job.job_id
+        logging.info(f"[PrintService] Starting encrypted print for job {job_id}")
+        
+        try:
+            # SINGLE ALLOCATION: Decrypt directly to memfd
+            memfd = await self._decrypt_to_memfd(print_job)
+            if memfd is None:
+                return PrintResult(
+                    success=False,
+                    error_message=f"Failed to decrypt GCode for job {job_id}"
+                )
+            
+            # Parse metadata using the same memfd (no duplication)
+            metadata = await self._parse_metadata_from_memfd(memfd, print_job.metadata, print_job.filename)
+            
+            # Extract layer count using the same memfd (no duplication)
+            layer_count = await self._extract_layer_count_from_memfd(memfd, print_job.filename)
+            metadata['layer_count'] = layer_count
+            
+            # Start the print using the same memfd
+            success = await self._start_klipper_print(memfd, print_job.filename, metadata)
+            
+            if success:
+                result = PrintResult(
+                    success=True,
+                    memfd=memfd,
+                    metadata=metadata,
+                    layer_count=layer_count
+                )
+                self.active_prints[job_id] = result
+                logging.info(f"[PrintService] Successfully started print for job {job_id}")
+                return result
+            else:
+                # Clean up memfd if print start failed
+                os.close(memfd)
+                return PrintResult(
+                    success=False,
+                    error_message=f"Failed to start Klipper print for job {job_id}"
+                )
+                
+        except Exception as e:
+            logging.error(f"[PrintService] Error starting print for job {job_id}: {e}")
+            return PrintResult(
+                success=False,
+                error_message=str(e)
+            )
+    
+    async def start_print_with_decrypted_memfd(self, job_id: str, decrypted_memfd: int, filename: str) -> PrintResult:
+        """
+        Start a print job with pre-decrypted memfd data
+        
+        Args:
+            job_id: Job identifier
+            decrypted_memfd: File descriptor containing decrypted GCode
+            filename: Virtual filename for the print
+            
+        Returns:
+            PrintResult with success status
+        """
+        logging.info(f"[PrintService] Starting print with pre-decrypted memfd for job {job_id}")
+        
+        try:
+            # Parse metadata using the decrypted memfd
+            metadata = await self._parse_metadata_from_memfd(decrypted_memfd, {}, filename)
+            
+            # Extract layer count using the decrypted memfd
+            layer_count = await self._extract_layer_count_from_memfd(decrypted_memfd, filename)
+            metadata['layer_count'] = layer_count
+            
+            # Start the print using the decrypted memfd
+            success = await self._start_klipper_print(decrypted_memfd, filename, metadata)
+            
+            if success:
+                result = PrintResult(
+                    success=True,
+                    memfd=decrypted_memfd,
+                    metadata=metadata,
+                    layer_count=layer_count
+                )
+                self.active_prints[job_id] = result
+                logging.info(f"[PrintService] Successfully started print for job {job_id}")
+                return result
+            else:
+                return PrintResult(
+                    success=False,
+                    error_message=f"Failed to start Klipper print for job {job_id}"
+                )
+                
+        except Exception as e:
+            logging.error(f"[PrintService] Error starting print with decrypted memfd for job {job_id}: {e}")
+            return PrintResult(
+                success=False,
+                error_message=str(e)
+            )
+    
+    async def _decrypt_to_memfd(self, print_job: PrintJob) -> Optional[int]:
+        """
+        Decrypt encrypted GCode to an anonymous memfd by invoking the compiled
+        lmnt_decrypt Go helper binary as a subprocess.
+
+        The binary handles all cryptographic operations (NaCl Box DEK decryption
+        + AES-256-CBC G-code decryption) without exposing the DEK or plaintext
+        to the Python process. It parks until it receives SIGTERM.
+
+        Returns:
+            memfd file descriptor (int) or None if the helper binary failed.
+        """
+        binary = self._helper_binary
+        if not binary.exists():
+            logging.error(f"[PrintService] lmnt_decrypt binary not found at {binary}. Run install.sh.")
+            return None
+
+        # Extract the raw 32-byte private key from the in-memory NaCl key object
+        nacl_key = self.integration.crypto_manager.dlt_private_key_ed25519
+        if nacl_key is None:
+            logging.error("[PrintService] Printer private key not loaded.")
+            return None
+        key_hex = bytes(nacl_key).hex()
+
+        # Build command for 'Pure Filter' mode (no API calls in Go)
+        cmd = [
+            str(binary),
+            "--job-id", print_job.job_id,
+            "--key-hex", key_hex,
+            "--dek-package", print_job.dek_package,
+            "--iv-hex", print_job.iv_hex,
+        ]
+
+        try:
+            logging.info(f"[PrintService] Launching lmnt_decrypt filter for job {print_job.job_id}...")
+            
+            # Start process with pipes for stdin/stdout
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+
+            # Pipe the encrypted data to the helper's stdin in a background thread
+            def pipe_data():
+                try:
+                    proc.stdin.buffer.write(print_job.encrypted_data)
+                    proc.stdin.buffer.flush()
+                    proc.stdin.buffer.close()
+                except Exception as e:
+                    logging.error(f"[PrintService] Helper pipe error: {e}")
+
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, pipe_data)
+
+            # Read the fd path from the first line of stdout (e.g. "/proc/self/fd/7")
+            fd_path_str = await loop.run_in_executor(None, proc.stdout.readline)
+            fd_path = fd_path_str.strip()
+
+            if not fd_path or not fd_path.startswith("/proc/"):
+                stderr_out = await loop.run_in_executor(None, proc.stderr.read)
+                logging.error(f"[PrintService] Helper failed: stderr={stderr_out}")
+                proc.kill()
+                return None
+
+            # Re-open the fd through /proc/<pid>/fd/<n> in our own process
+            helper_pid = proc.pid
+            our_fd_path = fd_path.replace("/proc/self/", f"/proc/{helper_pid}/")
+            memfd = os.open(our_fd_path, os.O_RDWR)
+
+            # Keep the helper process alive so its memfd stays open.
+            self._helper_procs[print_job.job_id] = proc
+            logging.info(f"[PrintService] Decryption successful. memfd={memfd} (pid={helper_pid})")
+            return memfd
+
+        except Exception as e:
+            logging.error(f"[PrintService] Failed to launch lmnt_decrypt for job {print_job.job_id}: {e}")
+            return None
+    
+    async def _parse_metadata_from_memfd(self, memfd: int, existing_metadata: Dict[str, Any], filename: str = None) -> Dict[str, Any]:
+        """
+        Parse metadata from memfd using seek operations.
+        Offloads blocking I/O to a background thread to prevent Klipper watchdog issues.
+        """
+        return await asyncio.to_thread(self._parse_metadata_sync, memfd, existing_metadata, filename)
+
+    def _parse_metadata_sync(self, memfd: int, existing_metadata: Dict[str, Any], filename: str = None) -> Dict[str, Any]:
+        metadata = existing_metadata.copy()
+        try:
+            # Save current position
+            current_pos = os.lseek(memfd, 0, os.SEEK_CUR)
+            
+            # Read first 1MB (Header)
+            os.lseek(memfd, 0, os.SEEK_SET)
+            header_content = os.read(memfd, 1024 * 1024).decode('utf-8', errors='ignore')
+            
+            # Read last 1MB (Footer)
+            try:
+                # Use a separate file descriptor logic in thread
+                file_size = os.lseek(memfd, 0, os.SEEK_END)
+                footer_start = max(0, file_size - 1024 * 1024)
+                os.lseek(memfd, footer_start, os.SEEK_SET)
+                footer_content = os.read(memfd, 1024 * 1024).decode('utf-8', errors='ignore')
+            except Exception:
+                footer_content = ""
+            
+            # Restore position
+            os.lseek(memfd, current_pos, os.SEEK_SET)
+            
+            # Combine content for parsing
+            full_content = header_content + "\n" + footer_content
+            
+            # Use centralized GCodeManager for parsing
+            parsed_metadata = self.integration.gcode_manager.parse_gcode_metadata(full_content)
+            
+            # Merge parsed metadata (update existing)
+            metadata.update(parsed_metadata)
+            
+            # Ensure "size" and "modified" exist so KlipperScreen/Mainsail
+            # treat this virtual print job as a fully valid entry in their UI logic.
+            try:
+                gcode_size = os.fstat(memfd).st_size
+                metadata['size'] = gcode_size
+                metadata['modified'] = time.time()
+            except Exception as e:
+                logging.warning(f"[PrintService] Could not extract memfd file size: {e}")
+            
+            # --- Thumbnail Extraction for Virtual Files ---
+            if filename and self.file_manager:
+                try:
+                    gcodes_path = None
+                    if hasattr(self.file_manager, "get_directory"):
+                        gcodes_path = self.file_manager.get_directory("gcodes")
+                    elif hasattr(self.integration.server, "get_app_args"):
+                        data_path = self.integration.server.get_app_args().get('data_path', '')
+                        if data_path:
+                            gcodes_path = os.path.join(data_path, "gcodes")
+                            
+                    if gcodes_path:
+                        # Find thumbnail sections
+                        thumbnails = []
+                        lines = header_content.splitlines()
+                        
+                        clean_filename = filename[len("virtual_"):] if filename.startswith("virtual_") else filename
+                        virtual_filename = f"virtual_{clean_filename}"
+                        
+                        # Thumbnails natively live in <gcodes>/.thumbs/
+                        thumbs_dir = os.path.join(gcodes_path, ".thumbs")
+                        
+                        base_name = virtual_filename
+                        if base_name.lower().endswith(".gcode"):
+                            base_name = base_name[:-6]
+                        
+                        i = 0
+                        while i < len(lines):
+                            line = lines[i].strip()
+                            if line.startswith('; thumbnail begin'):
+                                try:
+                                    parts = line.split()
+                                    dimensions = parts[3].split('x')
+                                    width = int(dimensions[0])
+                                    height = int(dimensions[1])
+                                    size = int(parts[4]) if len(parts) > 4 else 0
+                                    
+                                    base64_data = ""
+                                    i += 1
+                                    while i < len(lines) and not lines[i].strip().startswith('; thumbnail end'):
+                                        if lines[i].strip().startswith(';'):
+                                            # remove leading ;
+                                            b64_line = lines[i].strip()[1:].strip()
+                                            base64_data += b64_line
+                                        i += 1
+                                        
+                                    if base64_data:
+                                        import base64
+                                        image_data = base64.b64decode(base64_data)
+                                        os.makedirs(thumbs_dir, exist_ok=True)
+                                        
+                                        thumb_filename = f"{base_name}-{width}x{height}.png"
+                                        thumb_filepath = os.path.join(thumbs_dir, thumb_filename)
+                                        
+                                        with open(thumb_filepath, 'wb') as f:
+                                            f.write(image_data)
+                                            
+                                        rel_path = f".thumbs/{thumb_filename}"
+                                        thumbnails.append({
+                                            'width': width,
+                                            'height': height,
+                                            'size': len(image_data),
+                                            'relative_path': rel_path
+                                        })
+                                        logging.info(f"[PrintService] Extracted virtual thumbnail: {rel_path}")
+                                except Exception as e:
+                                    logging.error(f"[PrintService] Error parsing thumbnail metadata: {e}")
+                            i += 1
+                            
+                        if thumbnails:
+                            metadata['thumbnails'] = thumbnails
+                            
+                except Exception as e:
+                    logging.error(f"[PrintService] Error extracting thumbnails from memfd: {e}")
+                    
+            logging.info(f"[PrintService] Parsed metadata: {metadata}")
+            return metadata
+            
+        except Exception as e:
+            logging.error(f"[PrintService] Error in sync metadata parse: {e}")
+            return metadata
+    
+    async def _extract_layer_count_from_memfd(self, memfd: int, filename: str = None) -> int:
+        """
+        Extract layer count from memfd using seek operations (no duplication)
+        
+        Args:
+            memfd: File descriptor to read from
+            filename: Virtual filename for the print
+            
+        Returns:
+            Layer count or 0 if not found
+        """
+        try:
+            # Reuse _parse_metadata_from_memfd to get layer count
+            metadata = await self._parse_metadata_from_memfd(memfd, {}, filename)
+            layer_count = metadata.get('layer_count', 0)
+            
+            if layer_count > 0:
+                logging.info(f"[PrintService] Found layer count: {layer_count}")
+                return layer_count
+            else:
+                logging.warning("[PrintService] No layer count found in GCode")
+                return 0
+                
+        except Exception as e:
+            logging.error(f"[PrintService] Error extracting layer count: {e}")
+            return 0
+    
+    async def _start_klipper_print(self, memfd: int, filename: str, metadata: Dict[str, Any]) -> bool:
+        """
+        Start print in Klipper using the memfd
+        
+        Args:
+            memfd: File descriptor containing decrypted GCode
+            filename: Virtual filename for the print
+            metadata: Print metadata
+            
+        Returns:
+            True if print started successfully
+        """
+        try:
+            if not self.klippy_apis:
+                logging.error("[PrintService] No Klipper APIs available")
+                raise Exception("Klippy APIs not initialized")
+
+            # Rewind memfd for Klipper
+            os.lseek(memfd, 0, os.SEEK_SET)
+
+            # Get Moonraker PID for registration
+            moonraker_pid = os.getpid()
+            
+            # Strip virtual_ if already present to prevent double prefixing
+            clean_filename = filename
+            if clean_filename.startswith("virtual_"):
+                clean_filename = clean_filename[len("virtual_"):]
+            
+            virtual_filename = f"virtual_{clean_filename}"
+
+            # 1. Register the encrypted file with Klipper
+            register_cmd = f'REGISTER_ENCRYPTED_FILE FILENAME="{virtual_filename}" PID={moonraker_pid} FD={memfd}'
+            if metadata.get('layer_count', 0) > 0:
+                register_cmd += f' LAYER_COUNT={metadata["layer_count"]}'
+
+            try:
+                await self.klippy_apis.run_gcode(register_cmd)
+            except Exception as e:
+                logging.error(f"[PrintService] Failed REGISTER_ENCRYPTED_FILE: {e}")
+                raise Exception(f"Klipper registration failed: {e}")
+            logging.info(f"[PrintService] Registered encrypted file: {virtual_filename}")
+
+            # 2. Save metadata to file manager
+            if self.file_manager:
+                try:
+                    gcode_metadata = self.file_manager.get_metadata_storage()
+                    gcode_metadata.insert(virtual_filename, metadata)
+                    # Announce file creation to UI
+                    self.file_manager._sched_changed_event("create", "gcodes", virtual_filename, immediate=True)
+                    
+                    try:
+                        md_payload = metadata.copy()
+                        md_payload['filename'] = virtual_filename
+                        md_payload['job_id'] = None
+                        
+                        # Tell UI that metadata has successfully parsed instantly
+                        self.server.send_event("file_manager:metadata_parsed", md_payload)
+                        
+                        logging.info(f"[PrintService] Metadata broadcast event for: {virtual_filename}")
+                    except Exception as e:
+                        logging.warning(f"[PrintService] Metadata broadcast failure: {e}")
+                            
+                except Exception as e:
+                    logging.warning(f"[PrintService] Failed to persist metadata for {virtual_filename}: {e}")
+                else:
+                    logging.info(f"[PrintService] Saved metadata and announced file: {virtual_filename}")
+
+            # 3. Set up print metadata in Klipper
+            if metadata.get('layer_count', 0) > 0:
+                try:
+                    await self.klippy_apis.run_gcode(
+                        f"SET_PRINT_STATS_INFO TOTAL_LAYER={metadata['layer_count']}"
+                    )
+                except Exception as e:
+                    logging.warning(f"[PrintService] Failed to set TOTAL_LAYER: {e}")
+
+            # 4. Start the print using SET_GCODE_FD directly
+            # This bypasses the need for the SDCARD_PRINT_FILE macro override
+            try:
+                await self.klippy_apis.run_gcode(
+                    f"SET_GCODE_FD FILENAME={virtual_filename}"
+                )
+            except Exception as e:
+                logging.error(f"[PrintService] Failed SET_GCODE_FD: {e}")
+                raise Exception(f"Klipper start failed: {e}")
+
+            logging.info(f"[PrintService] Successfully started Klipper print: {virtual_filename}")
+            return True
+
+        except Exception as e:
+            logging.error(f"[PrintService] Error starting Klipper print: {e}")
+            raise
+    
+    def cleanup_print(self, job_id: str):
+        """Clean up resources for a completed print job"""
+        # Terminate the helper binary first (releases the binary-side fd)
+        if job_id in self._helper_procs:
+            proc = self._helper_procs.pop(job_id)
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+                logging.info(f"[PrintService] lmnt_decrypt helper terminated for job {job_id}")
+            except Exception as e:
+                logging.warning(f"[PrintService] Error terminating lmnt_decrypt for job {job_id}: {e}")
+                proc.kill()
+
+        if job_id in self.active_prints:
+            result = self.active_prints.pop(job_id)
+            if result.memfd:
+                try:
+                    os.close(result.memfd)
+                    logging.info(f"[PrintService] Cleaned up memfd for job {job_id}")
+                except OSError as e:
+                    logging.warning(f"[PrintService] Error closing memfd for job {job_id}: {e}")
+    
+    def get_active_prints(self) -> Dict[str, PrintResult]:
+        """Get all active print jobs"""
+        return self.active_prints.copy()

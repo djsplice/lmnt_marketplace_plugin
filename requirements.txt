@@ -1,0 +1,8 @@
+# LMNT Marketplace Plugin Security Dependencies
+# Required for hardware-bound private key encryption
+
+PyJWT
+cryptography>=41.0.0  # For AES encryption, PBKDF2, and secure key derivation
+aiohttp 
+requests 
+PyNaCl>=1.5.0
