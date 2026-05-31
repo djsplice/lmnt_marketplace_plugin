@@ -12,6 +12,21 @@ from typing import Optional
 from moonraker.common import UserInfo
 from moonraker.utils.exceptions import ServerError
 import traceback
+
+# Inject plugin virtualenv path BEFORE importing from lmnt_marketplace
+# This ensures dependencies like PyJWT are found regardless of component load order
+_current_file = os.path.realpath(__file__)
+_repo_dir = os.path.abspath(os.path.join(os.path.dirname(_current_file), "..", "..", ".."))
+_venv_site_packages = os.path.join(
+    _repo_dir,
+    ".venv", "lib", f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages"
+)
+if os.path.isdir(_venv_site_packages) and _venv_site_packages not in sys.path:
+    import site
+    site.addsitedir(_venv_site_packages)
+    sys.path.insert(1, _venv_site_packages)
+    logging.info(f"[EncryptedPrint] Injected venv path: {_venv_site_packages}")
+
 from .lmnt_marketplace.print_service import PrintJob, PrintResult
 
 # Ensure the current directory is in the Python path for imports
