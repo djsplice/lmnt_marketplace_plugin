@@ -520,6 +520,36 @@ class JobManager:
         
         logging.info("LMNT Job Manager: Shutdown handling complete")
     
+    async def close(self):
+        """Close the job manager and cancel all background tasks"""
+        logging.info("LMNT Job Manager: Closing and cancelling background tasks")
+        
+        # Cancel job polling task
+        if self.job_polling_task and not self.job_polling_task.done():
+            self.job_polling_task.cancel()
+            try:
+                await self.job_polling_task
+            except asyncio.CancelledError:
+                logging.info("Job polling task cancelled during close")
+            except Exception as e:
+                logging.error(f"Error cancelling job polling task: {str(e)}")
+        
+        # Cancel firebase listener task
+        if hasattr(self, 'firebase_listener_task') and self.firebase_listener_task and not self.firebase_listener_task.done():
+            self.firebase_listener_task.cancel()
+            try:
+                await self.firebase_listener_task
+            except asyncio.CancelledError:
+                logging.info("Firebase listener task cancelled during close")
+            except Exception as e:
+                logging.error(f"Error cancelling firebase listener task: {str(e)}")
+        
+        # Reset state
+        self.job_polling_task = None
+        self.firebase_listener_task = None
+        
+        logging.info("LMNT Job Manager: Closed successfully")
+    
     async def _process_next_job(self):
         logging.info("LMNT PROCESS: _process_next_job called")
         if not self.print_job_queue:

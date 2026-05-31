@@ -209,7 +209,10 @@ class LmntMarketplaceIntegration:
         """
         Close the integration and release resources
         """
-        # Close all managers first
+        # Close all managers first (cancel tasks before closing HTTP client)
+        if hasattr(self, 'job_manager'):
+            await self.job_manager.close()
+            
         if hasattr(self, 'auth_manager'):
             await self.auth_manager.close()
             
