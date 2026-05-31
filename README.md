@@ -100,17 +100,47 @@ firebase_project_id: lmnt-prod
 *   `marketplace_url`: API endpoint (Default: https://api.lmnt.co).
 *   `firebase_project_id`: Signaling for print job availability (Default: lmnt-prod)
 
-### Custom Firmwares (Snapmaker U1, etc.)
-The LMNT Marketplace Plugin supports custom Klipper environments that do not map to traditional installation paradigms (e.g. `SysVinit` instead of `systemd`, or missing virtual environments). 
+### Snapmaker U1 Custom Firmware
 
-- **Automated Restarts:** If your firmware's primary user (e.g. `lava`) lacks `sudo` privileges, `install.sh`, `update.sh`, and `uninstall.sh` will complete successfully but ask you to log in as `root` to manually restart the services.
-- **Updates:** Custom firmwares often cannot use Moonraker's built-in `[update_manager]` if they lack `sudo` or standard paths. To update the plugin on these machines, SSH into the printer and run:
-  ```bash
-  ~/lmnt_marketplace_plugin/scripts/update.sh
-  ```
-- **Monitoring Compatibility:** Print status polling uses Moonraker's canonical `query_objects()` signature with a fallback for legacy wrappers to support custom forks.
+The U1 uses an overlayfs-based root filesystem that resets `/home/lava` on every reboot **unless** `/oem/.debug` is present. The installer handles this automatically:
 
-For manual installation instructions, see [docs/installation.md](docs/installation.md).
+**Installation (run as root):**
+```bash
+# SSH as the 'lava' user, then switch to root
+ssh lava@<printer-ip>
+su -
+
+# Clone and install
+cd /oem/printer_data && git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
+./lmnt_marketplace_plugin/scripts/install.sh
+```
+
+The installer will:
+- Detect the U1 and relocate the plugin to `/oem/printer_data/lmnt_marketplace_plugin` (persistent)
+- Build a Python virtual environment in the persistent location
+- Snapshot your WiFi config so it survives the first reboot after enabling persistence
+- Touch `/oem/.debug` to enable rootfs persistence across reboots
+- Create all necessary symlinks into Moonraker/Klipper component directories
+
+**Important:** Firmware updates wipe `/oem/.debug` and reset the overlay. After **every firmware update**, you must SSH in as root and re-run the installer to restore the plugin.
+
+**Running as non-root:** If you run `install.sh` as the `lava` user, it will fail fast with instructions to use `su -`.
+
+**Manual recovery:** If anything ever breaks (lost symlinks, missing WiFi config, etc.), run the bootstrap helper directly as root:
+```bash
+su -
+/oem/printer_data/lmnt_marketplace_plugin/scripts/u1_bootstrap.sh
+```
+
+See [docs/installation.md](docs/installation.md) for full details.
+
+### Other Custom Firmwares
+
+For custom Klipper environments that do not map to traditional installation paradigms (e.g., `SysVinit` instead of `systemd`, or missing virtual environments), the installer attempts to auto-detect and adapt:
+
+- **Automated Restarts:** If your firmware's primary user lacks `sudo` privileges, scripts will complete successfully but ask you to log in as `root` to manually restart services.
+- **Updates:** Custom firmwares often cannot use Moonraker's built-in `[update_manager]`. To update manually, SSH into the printer and run `./scripts/update.sh`.
+- **Monitoring Compatibility:** Print status polling uses Moonraker's canonical `query_objects()` signature with a fallback for legacy wrappers.
 
 ## Troubleshooting
 

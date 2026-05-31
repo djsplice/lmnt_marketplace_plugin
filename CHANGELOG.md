@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.0] - 2026-05-31
+### Added
+- **Snapmaker U1 Persistent Install**: Plugin now installs to `/oem/printer_data/lmnt_marketplace_plugin/` which survives reboots and firmware updates (with re-install).
+- **U1 WiFi Safety**: Installer snapshots and restores `/etc/wpa_supplicant.conf` to prevent WiFi loss on first reboot after enabling persistence.
+- **Root Fail-Fast**: U1 installer now detects non-root execution immediately and exits with clear `su -` instructions before doing any work.
+- **Target HOME Resolution**: Install scripts now resolve `TARGET_HOME` correctly for U1 regardless of which user invokes them (fixes root `$HOME=/root` mismatch).
+
+### Changed
+- **Simplified U1 Model**: Removed fragile boot-time init.d hook installation. With `/oem/.debug` persistence, symlinks and configs survive reboots naturally. The `u1_bootstrap.sh` script is now a manual recovery tool rather than a boot hook.
+- **Documentation**: Added comprehensive U1 installation section to README and docs/installation.md with firmware update recovery steps.
+
 ## [1.2.4] - 2026-03-26
 ### Added
 - **Virtual Thumbnail Extraction**: Implemented real-time in-memory G-code header interception to extract model thumbnails from virtual `memfd` print jobs.

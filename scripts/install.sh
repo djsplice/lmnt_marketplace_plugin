@@ -8,11 +8,27 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 PLUGIN_NAME="lmnt-marketplace"
-PLUGIN_DIR="${HOME}/${PLUGIN_NAME}"
-MOONRAKER_DIR="${HOME}/moonraker"
+
+# -------------------------------------------------------------------------
+# Resolve TARGET_HOME (where Moonraker / Klipper / printer_data live).
+# On the Snapmaker U1, the printer user is `lava` and the only persistent
+# location is /oem/printer_data (exposed via /home/lava/printer_data). The
+# installer needs root for U1, but root's $HOME is /root which is wrong.
+# So if /home/lava/printer_data points at /oem/printer_data, force the
+# target paths to /home/lava regardless of who is running the script.
+# -------------------------------------------------------------------------
+if [ -L "/home/lava/printer_data" ] && \
+   [ "$(readlink -f /home/lava/printer_data)" = "/oem/printer_data" ]; then
+    TARGET_HOME="/home/lava"
+else
+    TARGET_HOME="${HOME}"
+fi
+
+PLUGIN_DIR="${TARGET_HOME}/${PLUGIN_NAME}"
+MOONRAKER_DIR="${TARGET_HOME}/moonraker"
 COMPONENT_DIR="${MOONRAKER_DIR}/moonraker/components"
-CONFIG_DIR="${HOME}/printer_data/config"
-KLIPPER_DIR="${HOME}/klipper"
+CONFIG_DIR="${TARGET_HOME}/printer_data/config"
+KLIPPER_DIR="${TARGET_HOME}/klipper"
 
 # Check if moonraker is installed
 if [ ! -d "${MOONRAKER_DIR}" ]; then
@@ -34,11 +50,45 @@ if [ ! -d "${KLIPPER_DIR}" ]; then
 fi
 
 # Check if printer_data exists (standard Klipper install)
-if [ ! -d "${HOME}/printer_data" ]; then
-    echo "Standard 'printer_data' directory not found at ${HOME}/printer_data."
+if [ ! -d "${TARGET_HOME}/printer_data" ]; then
+    echo "Standard 'printer_data' directory not found at ${TARGET_HOME}/printer_data."
     echo "This plugin requires a standard Klipper/Moonraker folder structure."
     exit 1
 fi
+
+# -------------------------------------------------------------------------
+# SNAPMAKER U1 DETECTION
+# -------------------------------------------------------------------------
+# The U1 firmware resets /home/lava on every reboot. Only /oem/printer_data
+# (the symlink target of ~/printer_data) survives. We detect the U1 by that
+# symlink and re-route the install into the persistent partition.
+IS_SNAPMAKER_U1=0
+if [ -L "${TARGET_HOME}/printer_data" ] && \
+   [ "$(readlink -f "${TARGET_HOME}/printer_data")" = "/oem/printer_data" ] && \
+   [ -d "/oem" ]; then
+    IS_SNAPMAKER_U1=1
+    PERSISTENT_REPO_DIR="/oem/printer_data/lmnt_marketplace_plugin"
+    echo "Detected Snapmaker U1 (persistent install path: ${PERSISTENT_REPO_DIR})"
+
+    # Fail fast: the U1 install requires root to touch /oem/.debug and
+    # write the wifi backup. The firmware has no sudo, so the user must
+    # run via `su -`. Bail out before we do any work.
+    if [ "$(id -u)" -ne 0 ]; then
+        echo ""
+        echo "=========================================================="
+        echo " ERROR: Snapmaker U1 install requires root."
+        echo ""
+        echo " The U1 firmware does not include sudo. Please re-run as"
+        echo " root:"
+        echo ""
+        echo "   su -"
+        echo "   ${PERSISTENT_REPO_DIR}/scripts/install.sh"
+        echo "   # (or whatever path you ran this script from)"
+        echo "=========================================================="
+        exit 1
+    fi
+fi
+# -------------------------------------------------------------------------
 
 # -------------------------------------------------------------------------
 # BOOTSTRAP REPO if running via pipe or outside repo
@@ -48,7 +98,7 @@ fi
 if [ ! -f "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py" ]; then
     echo "Installer running outside of plugin repository (likely via curl | bash)."
     
-    REPO_DIR="${HOME}/lmnt_marketplace_plugin"
+    REPO_DIR="${TARGET_HOME}/lmnt_marketplace_plugin"
     REPO_URL="https://github.com/djsplice/lmnt_marketplace_plugin.git"
     
     if [ ! -d "${REPO_DIR}" ]; then
@@ -63,6 +113,58 @@ if [ ! -f "${REPO_DIR}/moonraker/moonraker/components/lmnt_marketplace_plugin.py
 else
     echo "Installer running from local repository at ${REPO_DIR}"
 fi
+
+# -------------------------------------------------------------------------
+# SNAPMAKER U1: relocate repo to persistent partition
+# -------------------------------------------------------------------------
+# On the U1 the rootfs (/home/lava) is wiped on every reboot. Move the repo
+# into /oem/printer_data which always persists. The .venv is created inside
+# the repo dir, so it also lives on the persistent partition.
+if [ "${IS_SNAPMAKER_U1}" = "1" ] && [ "${REPO_DIR}" != "${PERSISTENT_REPO_DIR}" ]; then
+    echo "Relocating plugin repo to persistent location: ${PERSISTENT_REPO_DIR}"
+    mkdir -p "$(dirname "${PERSISTENT_REPO_DIR}")"
+    # Always exclude .venv from the copy - shebangs in the source venv point
+    # at the volatile path and would break on reboot. The DEPENDENCIES step
+    # below will (re)build the venv in-place at the persistent location.
+    if [ -d "${PERSISTENT_REPO_DIR}" ]; then
+        echo "Updating existing persistent copy..."
+        rsync -a --delete \
+            --exclude='.venv' \
+            "${REPO_DIR}/" "${PERSISTENT_REPO_DIR}/" 2>/dev/null || {
+            # busybox cp fallback (no --exclude support)
+            for entry in "${REPO_DIR}"/* "${REPO_DIR}"/.[!.]*; do
+                [ -e "$entry" ] || continue
+                base="$(basename "$entry")"
+                [ "$base" = ".venv" ] && continue
+                rm -rf "${PERSISTENT_REPO_DIR}/${base}"
+                cp -rf "$entry" "${PERSISTENT_REPO_DIR}/${base}"
+            done
+        }
+    else
+        mkdir -p "${PERSISTENT_REPO_DIR}"
+        for entry in "${REPO_DIR}"/* "${REPO_DIR}"/.[!.]*; do
+            [ -e "$entry" ] || continue
+            base="$(basename "$entry")"
+            [ "$base" = ".venv" ] && continue
+            cp -rf "$entry" "${PERSISTENT_REPO_DIR}/${base}"
+        done
+    fi
+
+    # If a stale venv exists at the persistent path with shebangs pointing
+    # outside REPO_DIR (e.g. from a previous install), nuke it so it gets
+    # rebuilt with correct shebangs.
+    if [ -x "${PERSISTENT_REPO_DIR}/.venv/bin/python3" ]; then
+        VENV_SHEBANG="$(head -n 1 "${PERSISTENT_REPO_DIR}/.venv/bin/pip" 2>/dev/null || echo "")"
+        case "${VENV_SHEBANG}" in
+            *"${PERSISTENT_REPO_DIR}"*) : ;;  # ok
+            *) echo "Stale venv shebang detected; rebuilding"
+               rm -rf "${PERSISTENT_REPO_DIR}/.venv" ;;
+        esac
+    fi
+
+    REPO_DIR="${PERSISTENT_REPO_DIR}"
+    echo "REPO_DIR is now ${REPO_DIR}"
+fi
 # -------------------------------------------------------------------------
 
 # -------------------------------------------------------------------------
@@ -70,6 +172,17 @@ fi
 # -------------------------------------------------------------------------
 VENV_DIR="${REPO_DIR}/.venv"
 echo "Setting up plugin isolated virtual environment at ${VENV_DIR}..."
+
+# Detect Python version mismatch (can happen after firmware upgrade on U1)
+SYSTEM_PY_VERSION="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if [ -d "${VENV_DIR}" ]; then
+    VENV_PY_LIB="${VENV_DIR}/lib/python${SYSTEM_PY_VERSION}"
+    if [ ! -d "${VENV_PY_LIB}" ]; then
+        echo "Python version changed (system is ${SYSTEM_PY_VERSION}); rebuilding venv..."
+        rm -rf "${VENV_DIR}"
+    fi
+fi
+
 if [ ! -d "${VENV_DIR}" ]; then
     python3 -m venv "${VENV_DIR}"
 fi
@@ -158,7 +271,7 @@ if [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
             echo -e "path: ${REPO_DIR}" >> "${CONFIG_DIR}/moonraker.conf"
             echo -e "origin: https://github.com/djsplice/lmnt_marketplace_plugin.git" >> "${CONFIG_DIR}/moonraker.conf"
             echo -e "primary_branch: main" >> "${CONFIG_DIR}/moonraker.conf"
-            echo -e "env: ${HOME}/moonraker-env/bin/python" >> "${CONFIG_DIR}/moonraker.conf"
+            echo -e "env: ${TARGET_HOME}/moonraker-env/bin/python" >> "${CONFIG_DIR}/moonraker.conf"
             echo -e "requirements: requirements.txt" >> "${CONFIG_DIR}/moonraker.conf"
             echo -e "install_script: scripts/install.sh" >> "${CONFIG_DIR}/moonraker.conf"
             echo -e "is_system_service: False" >> "${CONFIG_DIR}/moonraker.conf"
@@ -287,6 +400,75 @@ else
     echo "Warning: printer.cfg not found at ${CONFIG_DIR}/printer.cfg"
     echo "Please manually add [encrypted_file_bridge] and [secure_print] to your printer.cfg (ABOVE invalid sections like SAVE_CONFIG)."
 fi
+
+# -------------------------------------------------------------------------
+# SNAPMAKER U1: enable rootfs persistence + run setup helper once
+# -------------------------------------------------------------------------
+# The U1 root filesystem is a squashfs+overlayfs combination. Without
+# /oem/.debug, the overlay upper layer (/oem/overlay/upper) is wiped on
+# every boot. With /oem/.debug present, the entire rootfs persists across
+# reboots, including:
+#   - Symlinks under /home/lava/moonraker/.../components/
+#   - Klipper extras under /home/lava/klipper/klippy/extras/
+#   - The lmnt_decrypt binary symlink
+#   - /etc/wpa_supplicant.conf
+#
+# So we don't need a boot-time hook -- once persistence is on, everything
+# we set up below stays put. The only delicate moment is the FIRST reboot
+# after enabling /oem/.debug, when the wifi config in the (about-to-persist)
+# upper layer may be empty. We snapshot and re-write it to be safe.
+#
+# Firmware updates remove /oem/.debug and wipe the upper overlay. After any
+# firmware update the user must SSH in as root and re-run this installer.
+if [ "${IS_SNAPMAKER_U1}" = "1" ]; then
+    BOOTSTRAP_SCRIPT="${REPO_DIR}/scripts/u1_bootstrap.sh"
+    BACKUP_DIR="/oem/printer_data/lmnt_install_backup"
+    # Root requirement already enforced at the top of this script.
+
+    # --- Preserve wifi credentials across /oem/.debug activation ---------
+    mkdir -p "${BACKUP_DIR}"
+    if [ -s /etc/wpa_supplicant.conf ] && \
+       grep -q 'network=' /etc/wpa_supplicant.conf 2>/dev/null; then
+        cp /etc/wpa_supplicant.conf "${BACKUP_DIR}/wpa_supplicant.conf.bak"
+        chmod 600 "${BACKUP_DIR}/wpa_supplicant.conf.bak"
+        echo "Backed up wifi credentials to ${BACKUP_DIR}/wpa_supplicant.conf.bak"
+    fi
+
+    echo "Enabling rootfs persistence (touch /oem/.debug)..."
+    touch /oem/.debug
+
+    # Force the persistent upper layer to capture wifi creds NOW.
+    if [ -s "${BACKUP_DIR}/wpa_supplicant.conf.bak" ]; then
+        cp "${BACKUP_DIR}/wpa_supplicant.conf.bak" /etc/wpa_supplicant.conf
+        chmod 600 /etc/wpa_supplicant.conf
+        echo "Re-wrote /etc/wpa_supplicant.conf to capture it in the persistent overlay"
+    fi
+    # ---------------------------------------------------------------------
+
+    # Run the setup helper once to (re-)create symlinks deterministically.
+    if [ -x "${BOOTSTRAP_SCRIPT}" ]; then
+        echo "Running U1 setup helper: ${BOOTSTRAP_SCRIPT}"
+        "${BOOTSTRAP_SCRIPT}" || true
+    else
+        echo "WARNING: ${BOOTSTRAP_SCRIPT} not found or not executable"
+    fi
+
+    echo ""
+    echo "=========================================================="
+    echo " Snapmaker U1 install complete"
+    echo ""
+    echo "   - Plugin source:  ${REPO_DIR}  (persistent)"
+    echo "   - /oem/.debug touched -> rootfs now persists across reboots"
+    echo "   - Wifi backup:    ${BACKUP_DIR}/wpa_supplicant.conf.bak"
+    echo "   - Recovery tool:  ${BOOTSTRAP_SCRIPT}"
+    echo ""
+    echo "   IMPORTANT: Firmware updates wipe /oem/.debug and the rootfs"
+    echo "   overlay. After every firmware update, SSH in as root and"
+    echo "   re-run ${REPO_DIR}/scripts/install.sh"
+    echo "=========================================================="
+    echo ""
+fi
+# -------------------------------------------------------------------------
 
 echo "Installation complete!"
 
