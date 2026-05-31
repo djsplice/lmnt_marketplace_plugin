@@ -39,7 +39,7 @@ class LmntMarketplaceIntegration:
         self.config = config
         self.klippy_apis = None
         self.http_client = None  # Will be created in initialize()
-        self.api_version = "1.0.0"  # Backend API version, not plugin version
+        self.api_version = "1.0.1"  # Backend API version, not plugin version
         
         # Set up paths for tokens, keys, and data storage
         data_path = self.server.get_app_args()['data_path']
