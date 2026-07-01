@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- **Dedicated Snapmaker U1 Guide**: New `docs/snapmaker_u1.md` with the complete U1 installation, persistence, and troubleshooting walkthrough.
+- **README U1 Announcement**: Added a prominent banner at the top of the README highlighting the U1 as the first commercial printer supported by the LMNT Marketplace plugin.
+
+### Changed
+- **Documentation Reorganization**: Moved the full U1 instructions from the README and `docs/installation.md` into `docs/snapmaker_u1.md`. The README and general install guide now provide a quick summary and link to the dedicated page.
+
+### Fixed
+- **Documentation Accuracy**: Corrected `marketplace_url` and `firebase_project_id` in `docs/installation.md` to match the installer output. Added curl/tar fallbacks throughout the install guides and standardized the PAXX12 firmware name.
+
 ## [1.3.0] - 2026-05-31
 ### Added
 - **Snapmaker U1 Persistent Install**: Plugin now installs to `/oem/printer_data/lmnt_marketplace_plugin/` which survives reboots and firmware updates (with re-install).

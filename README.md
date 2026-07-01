@@ -2,6 +2,11 @@
 
 The official LMNT Marketplace plugin for Klipper. This component enables secure, end-to-end encrypted printing by handling on-device decryption and seamless integration with the LMNT Marketplace ecosystem. It protects creator intellectual property while delivering a native, hassle-free printing experience for users.
 
+> **🎉 Snapmaker U1 support is now in Beta — the first commercial 3D printer in the LMNT Marketplace ecosystem.**
+>
+> The PAXX12 Extended Firmware is supported with a dedicated installation flow, persistent storage across reboots, and automatic WiFi credential preservation.
+> See the [Snapmaker U1 Installation Guide](docs/snapmaker_u1.md) for details.
+
 ## Requirements
 
 Before installing, ensure your system meets the following requirements:
@@ -100,39 +105,31 @@ firebase_project_id: lmnt-prod
 *   `marketplace_url`: API endpoint (Default: https://api.lmnt.co).
 *   `firebase_project_id`: Signaling for print job availability (Default: lmnt-prod)
 
-### Snapmaker U1 Custom Firmware
+### Snapmaker U1 Custom Firmware (Beta)
 
-The U1 uses an overlayfs-based root filesystem that resets `/home/lava` on every reboot **unless** `/oem/.debug` is present. The installer handles this automatically:
+The U1 is the first commercial printer supported by the LMNT Marketplace plugin. It uses an overlayfs-based root filesystem that resets `/home/lava` on every reboot unless `/oem/.debug` is present. The installer handles persistence automatically.
 
-**Installation (run as root):**
+**Quick install (run as root):**
 ```bash
-# SSH as the 'lava' user, then switch to root
 ssh lava@<printer-ip>
 su -
+cd /oem/printer_data
 
-# Clone and install
-cd /oem/printer_data && git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
+# If git is installed:
+git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
+
+# If git is not installed:
+curl -L https://github.com/djsplice/lmnt_marketplace_plugin/archive/refs/heads/main.tar.gz -o lmnt_marketplace_plugin.tar.gz
+rm -rf lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+tar -xzf lmnt_marketplace_plugin.tar.gz && rm -f lmnt_marketplace_plugin.tar.gz
+mv lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+
 ./lmnt_marketplace_plugin/scripts/install.sh
 ```
 
-The installer will:
-- Detect the U1 and relocate the plugin to `/oem/printer_data/lmnt_marketplace_plugin` (persistent)
-- Build a Python virtual environment in the persistent location
-- Snapshot your WiFi config so it survives the first reboot after enabling persistence
-- Touch `/oem/.debug` to enable rootfs persistence across reboots
-- Create all necessary symlinks into Moonraker/Klipper component directories
+After installation, the plugin is fully persistent across reboots. Firmware updates are the only exception — they wipe `/oem/.debug`, so you must re-run the installer after each firmware update.
 
-**Important:** Firmware updates wipe `/oem/.debug` and reset the overlay. After **every firmware update**, you must SSH in as root and re-run the installer to restore the plugin.
-
-**Running as non-root:** If you run `install.sh` as the `lava` user, it will fail fast with instructions to use `su -`.
-
-**Manual recovery:** If anything ever breaks (lost symlinks, missing WiFi config, etc.), run the bootstrap helper directly as root:
-```bash
-su -
-/oem/printer_data/lmnt_marketplace_plugin/scripts/u1_bootstrap.sh
-```
-
-See [docs/installation.md](docs/installation.md) for full details.
+For the complete U1 guide, troubleshooting, and recovery steps, see the **[Snapmaker U1 Installation Guide](docs/snapmaker_u1.md)**.
 
 ### Other Custom Firmwares
 

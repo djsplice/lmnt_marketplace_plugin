@@ -8,7 +8,7 @@ Before installing, ensure your system meets the following requirements:
 
 *   **Klipper & Moonraker**: A functional installation of Klipper and Moonraker.
 *   **SSH Access**: Ability to connect to your printer via SSH.
-*   **Git**: `git` must be installed on your printer's host (e.g., Raspberry Pi).
+*   **Git or curl**: `git` is recommended for installation and updates. If `git` is not available, the install instructions include a `curl`/`tar` fallback.
 *   **Slicer Configuration**: For optimal layer progress tracking, add the following to your slicer's machine profile (e.g., OrcaSlicer):
     *   **Start G-code**: `SET_PRINT_STATS_INFO TOTAL_LAYER=[total_layer_count]`
     *   **Layer Change G-code**: `SET_PRINT_STATS_INFO CURRENT_LAYER={layer_num + 1}`
@@ -19,6 +19,18 @@ The easiest way to install the plugin is using the automated one-line installer.
 
 ```bash
 cd ~ && git clone https://github.com/djsplice/lmnt_marketplace_plugin.git && ./lmnt_marketplace_plugin/scripts/install.sh
+```
+
+If `git` is not installed:
+
+```bash
+cd ~
+curl -L https://github.com/djsplice/lmnt_marketplace_plugin/archive/refs/heads/main.tar.gz -o lmnt_marketplace_plugin.tar.gz
+rm -rf lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+tar -xzf lmnt_marketplace_plugin.tar.gz
+rm -f lmnt_marketplace_plugin.tar.gz
+mv lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+~/lmnt_marketplace_plugin/scripts/install.sh
 ```
 
 Once the script completes, proceed to **Step 2: Configure Klipper** below.
@@ -51,8 +63,8 @@ The install script attempts to modify `moonraker.conf` automatically. Verify tha
 
 ```ini
 [lmnt_marketplace_plugin]
-marketplace_url: https://printers.lmnt.co
-firebase_project_id: lmnt-dev
+marketplace_url: https://api.lmnt.co
+firebase_project_id: lmnt-prod
 check_interval: 0
 
 [encrypted_print]
@@ -103,108 +115,37 @@ sudo systemctl restart klipper
 
 ## Snapmaker U1 Installation
 
-The Snapmaker U1 custom firmware uses an overlayfs-based root filesystem. Without `/oem/.debug`, the upper layer (where all changes live) is wiped on every boot. The installer handles U1 detection and persistence setup automatically.
+The Snapmaker U1 is the first commercial printer supported by the LMNT Marketplace plugin. **Snapmaker U1 support is currently in Beta.**
 
-### Prerequisites
+Because the U1 differs significantly from a standard Raspberry Pi install, it has a dedicated guide:
 
-- U1 with the Extended Firmware installed
-- SSH access (default user: `lava`, password: `lava`)
-- Root access (via `su -`) — the firmware has no `sudo`
+**👉 See the [Snapmaker U1 Installation Guide](snapmaker_u1.md)** for prerequisites, step-by-step installation, persistence behavior, firmware update recovery, and troubleshooting.
 
-### Installation Steps
+Quick reference:
 
-**1. SSH into the printer and become root:**
 ```bash
 ssh lava@<printer-ip>
 su -
-```
-
-**2. Clone the plugin to the persistent location:**
-```bash
 cd /oem/printer_data
-git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
-```
 
-**3. Run the installer:**
-```bash
+# If git is available:
+git clone https://github.com/djsplice/lmnt_marketplace_plugin.git
+
+# If git is not available:
+curl -L https://github.com/djsplice/lmnt_marketplace_plugin/archive/refs/heads/main.tar.gz -o lmnt_marketplace_plugin.tar.gz
+rm -rf lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+tar -xzf lmnt_marketplace_plugin.tar.gz && rm -f lmnt_marketplace_plugin.tar.gz
+mv lmnt_marketplace_plugin-main lmnt_marketplace_plugin
+
 ./lmnt_marketplace_plugin/scripts/install.sh
 ```
 
-The installer will:
-- Detect the U1 automatically
-- Relocate the plugin source to `/oem/printer_data/lmnt_marketplace_plugin` (always persistent)
-- Build a Python virtual environment at that location with correct shebangs
-- Back up your current WiFi config (`/etc/wpa_supplicant.conf`) to `/oem/printer_data/lmnt_install_backup/`
-- Touch `/oem/.debug` to enable rootfs persistence across reboots
-- Re-write the WiFi config to ensure it's captured in the now-persistent upper overlay
-- Run `u1_bootstrap.sh` once to create symlinks into Moonraker and Klipper component directories
+After the install completes, restart services:
 
-**4. Restart services:**
-
-The U1 uses SysVinit instead of systemd. As root:
 ```bash
 /etc/init.d/S61moonraker restart
 /etc/init.d/S60klipper restart
 ```
-
-### Post-Install Behavior
-
-Once `/oem/.debug` is enabled, **everything persists** across reboots:
-- Plugin source in `/oem/printer_data/lmnt_marketplace_plugin/`
-- Symlinks in `/home/lava/moonraker/moonraker/components/`
-- Klipper extras in `/home/lava/klipper/klippy/extras/`
-- WiFi config in `/etc/wpa_supplicant.conf`
-- The lmnt_decrypt binary symlink
-
-The WiFi backup at `/oem/printer_data/lmnt_install_backup/wpa_supplicant.conf.bak` serves as a safety net. If WiFi config is ever lost, you can restore it with:
-```bash
-su -
-/oem/printer_data/lmnt_marketplace_plugin/scripts/u1_bootstrap.sh
-```
-
-### Firmware Updates
-
-**Critical:** Firmware updates wipe `/oem/.debug` and reset the overlay upper layer. After every firmware update:
-
-1. Re-enable SSH and WiFi via the touchscreen
-2. SSH in as root:
-   ```bash
-   ssh lava@<printer-ip>
-   su -
-   ```
-3. Re-run the installer:
-   ```bash
-   /oem/printer_data/lmnt_marketplace_plugin/scripts/install.sh
-   ```
-
-### Running as Non-Root (lava user)
-
-If you accidentally run `install.sh` as the `lava` user, it will **fail fast** before doing any work and display:
-```
-ERROR: Snapmaker U1 install requires root.
-
-The U1 firmware does not include sudo. Please re-run as root:
-
-  su -
-  /oem/printer_data/lmnt_marketplace_plugin/scripts/install.sh
-```
-
-Simply run `su -` and re-execute the script.
-
-### Manual Recovery
-
-If anything gets out of sync (lost symlinks, missing WiFi, etc.), the `u1_bootstrap.sh` helper can restore everything idempotently:
-
-```bash
-su -
-/oem/printer_data/lmnt_marketplace_plugin/scripts/u1_bootstrap.sh
-```
-
-This script:
-- Restores WiFi config from backup if `/etc/wpa_supplicant.conf` is missing or empty
-- Re-creates all Moonraker component symlinks
-- Re-creates all Klipper extras symlinks
-- Links the correct `lmnt_decrypt` binary for your architecture
 
 ---
 
