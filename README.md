@@ -13,7 +13,7 @@ The official LMNT Marketplace plugin for Klipper. This component enables secure,
 
 End-to-end test: LMNT marketplace purchase, print authorization, cloud slicing using native Orcaslicer profiles, encrypted G-code stream, full print on U1 (tool change included). No clear-text model downloads, or local slicing.
 
-**UI specific Install & configuration:** [docs/snapmaker_u1.md](docs/snapmaker_u1.md)
+**U1-specific Install & configuration:** [docs/snapmaker_u1.md](docs/snapmaker_u1.md)
 
 ## Requirements
 
