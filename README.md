@@ -7,6 +7,14 @@ The official LMNT Marketplace plugin for Klipper. This component enables secure,
 > The PAXX12 Extended Firmware is supported with a dedicated installation flow, persistent storage across reboots, and automatic WiFi credential preservation.
 > See the [Snapmaker U1 Installation Guide](docs/snapmaker_u1.md) for details.
 
+## Demo: Mutli-color print-on-demand support with the U1
+
+[![Snapmaker U1 integration demo](https://img.youtube.com/vi/wa4FWRCFPCA/hqdefault.jpg)](https://youtu.be/wa4FWRCFPCA)
+
+End-to-end test: LMNT marketplace purchase, print authorization, cloud slicing using native Orcaslicer profiles, encrypted G-code stream, full print on U1 (tool change included). No clear-text model downloads, or local slicing.
+
+**UI specific Install & configuration:** [docs/snapmaker_u1.md](docs/snapmaker_u1.md)
+
 ## Requirements
 
 Before installing, ensure your system meets the following requirements:
