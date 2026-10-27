@@ -727,10 +727,9 @@ class AuthManager:
                 logging.warning("LMNT AUTH: Token verification requested but no key available")
                 return None
             else:
-                # When not verifying signature, provide a dummy key and disable verification
+                # When not verifying signature, disable verification options
                 payload = jwt.decode(
                     token,
-                    key="dummy",  # Dummy key since we're not verifying
                     options={"verify_signature": False, "verify_exp": False, "verify_aud": False},
                     algorithms=["HS256", "HS512", "RS256", "RS512", "ES256", "ES512"]
                 )
@@ -1438,10 +1437,6 @@ class AuthManager:
             "token_created_at": self.token_created_at.isoformat() if self.token_created_at else None,
         }
         
-    async def handle_klippy_shutdown(self):
-        """Handle Klippy shutdown"""
-        self.klippy_apis = None
-        
     async def close(self):
         """Close the manager and release resources"""
         # Only close HTTP client if we created our own (not shared)
@@ -1450,33 +1445,6 @@ class AuthManager:
             await self.http_client.close()
             logging.info("Closed HTTP client for AuthManager")
         self.http_client = None
-    
-    def validate_printer_token(self, token):
-        """
-        Validate a printer token
-        
-        Returns:
-            dict: Token payload if valid
-            None: If token is invalid
-        """
-        try:
-            # Decode the token without verification first to get the algorithm
-            unverified_payload = jwt.decode(token, options={"verify_signature": False})
-            
-            # Now verify with the appropriate algorithm
-            algorithm = unverified_payload.get('alg', 'HS256')
-            payload = jwt.decode(token, "secret", algorithms=[algorithm])
-            
-            # Check if token is expired
-            exp = payload.get('exp')
-            if exp and datetime.fromtimestamp(exp) < datetime.now():
-                logging.warning("Printer token has expired")
-                return None
-            
-            return payload
-        except Exception as e:
-            logging.error(f"Error validating printer token: {str(e)}")
-            return None
 
     def _get_hardware_fingerprint(self):
         """

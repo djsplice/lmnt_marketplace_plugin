@@ -117,7 +117,16 @@ if [ -d "${REPO_DIR}/kalico_mods/extras" ]; then
 fi
 
 echo "Verifying configuration..."
-if [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
+MOONRAKER_LMNT_CFG="${CONFIG_DIR}/extended/moonraker/lmnt.cfg"
+KLIPPER_LMNT_CFG="${CONFIG_DIR}/extended/klipper/lmnt.cfg"
+if [ -f "${MOONRAKER_LMNT_CFG}" ]; then
+    if ! grep -q "\[lmnt_marketplace_plugin\]" "${MOONRAKER_LMNT_CFG}"; then
+        echo "Warning: [lmnt_marketplace_plugin] not found in ${MOONRAKER_LMNT_CFG}"
+    fi
+    if ! grep -q "\[encrypted_print\]" "${MOONRAKER_LMNT_CFG}"; then
+        echo "Warning: [encrypted_print] not found in ${MOONRAKER_LMNT_CFG}"
+    fi
+elif [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
     if ! grep -q "\[lmnt_marketplace_plugin\]" "${CONFIG_DIR}/moonraker.conf"; then
         echo "Warning: [lmnt_marketplace_plugin] not found in ${CONFIG_DIR}/moonraker.conf"
     fi
@@ -128,7 +137,14 @@ else
     echo "Warning: moonraker.conf not found at ${CONFIG_DIR}/moonraker.conf"
 fi
 
-if [ -f "${CONFIG_DIR}/printer.cfg" ]; then
+if [ -f "${KLIPPER_LMNT_CFG}" ]; then
+    if ! grep -q "\[encrypted_file_bridge\]" "${KLIPPER_LMNT_CFG}"; then
+        echo "Warning: [encrypted_file_bridge] not found in ${KLIPPER_LMNT_CFG}"
+    fi
+    if ! grep -q "\[secure_print\]" "${KLIPPER_LMNT_CFG}"; then
+        echo "Warning: [secure_print] not found in ${KLIPPER_LMNT_CFG}"
+    fi
+elif [ -f "${CONFIG_DIR}/printer.cfg" ]; then
     if ! grep -q "\[encrypted_file_bridge\]" "${CONFIG_DIR}/printer.cfg"; then
         echo "Warning: [encrypted_file_bridge] not found in ${CONFIG_DIR}/printer.cfg"
     fi

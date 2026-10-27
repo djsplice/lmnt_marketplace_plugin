@@ -72,7 +72,11 @@ The installer will:
 4. Preserve your WiFi credentials by snapshotting them to the persistent partition.
 5. Touch `/oem/.debug` to enable rootfs persistence.
 6. Create symlinks for Moonraker components, Klipper extras, and the `lmnt_decrypt` binary.
-7. Update `moonraker.conf` and `printer.cfg` with the required plugin sections.
+7. Write the plugin sections into the extended include directories, which survive a firmware update:
+   - `/oem/printer_data/config/extended/moonraker/lmnt.cfg`
+   - `/oem/printer_data/config/extended/klipper/lmnt.cfg`
+
+   `moonraker.conf` and `printer.cfg` are left alone. PAXX12 loads those directories with `[include extended/moonraker/*.cfg]` and `[include extended/klipper/*.cfg]`. An existing `lmnt.cfg` is kept. `lmnt.cfg.disabled` is renamed back to `lmnt.cfg`.
 
 ### 4. Restart the services
 
@@ -102,6 +106,8 @@ Follow the on-screen instructions to link the printer to your LMNT Marketplace a
 After `/oem/.debug` is enabled, the plugin is fully persistent across reboots:
 
 - **Plugin source**: `/oem/printer_data/lmnt_marketplace_plugin/`
+- **Moonraker config**: `/oem/printer_data/config/extended/moonraker/lmnt.cfg`
+- **Klipper config**: `/oem/printer_data/config/extended/klipper/lmnt.cfg`
 - **Moonraker components**: symlinks in `/home/lava/moonraker/moonraker/components/`
 - **Klipper extras**: symlinks in `/home/lava/klipper/klippy/extras/`
 - **WiFi config**: `/etc/wpa_supplicant.conf`

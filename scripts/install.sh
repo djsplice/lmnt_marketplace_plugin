@@ -250,6 +250,76 @@ if [ -d "${REPO_DIR}/kalico_mods/extras" ]; then
     cp "${REPO_DIR}/kalico_mods/extras/"*.py "${KLIPPER_DIR}/klippy/extras/" 2>/dev/null || true
 fi
 
+# Snapmaker U1 keeps plugin config in the extended include directories.
+# printer.cfg and moonraker.conf are replaced by firmware updates.
+# PAXX12 already loads extended/klipper/*.cfg and extended/moonraker/*.cfg.
+if [ "${IS_SNAPMAKER_U1}" = "1" ]; then
+    KLIPPER_EXT_DIR="${CONFIG_DIR}/extended/klipper"
+    MOONRAKER_EXT_DIR="${CONFIG_DIR}/extended/moonraker"
+    KLIPPER_LMNT_CFG="${KLIPPER_EXT_DIR}/lmnt.cfg"
+    MOONRAKER_LMNT_CFG="${MOONRAKER_EXT_DIR}/lmnt.cfg"
+
+    mkdir -p "${KLIPPER_EXT_DIR}" "${MOONRAKER_EXT_DIR}"
+
+    if [ -f "${MOONRAKER_LMNT_CFG}" ]; then
+        echo "Keeping existing ${MOONRAKER_LMNT_CFG}"
+    elif [ -f "${MOONRAKER_LMNT_CFG}.disabled" ]; then
+        mv "${MOONRAKER_LMNT_CFG}.disabled" "${MOONRAKER_LMNT_CFG}"
+        echo "Re-enabled ${MOONRAKER_LMNT_CFG}"
+    else
+        cat > "${MOONRAKER_LMNT_CFG}" <<'EOF'
+# LMNT Marketplace Plugin configuration
+[lmnt_marketplace_plugin]
+marketplace_url: https://api.lmnt.co
+firebase_project_id: lmnt-prod
+check_interval: 0
+
+[encrypted_print]
+EOF
+        echo "Wrote ${MOONRAKER_LMNT_CFG}"
+    fi
+
+    if [ -f "${KLIPPER_LMNT_CFG}" ]; then
+        echo "Keeping existing ${KLIPPER_LMNT_CFG}"
+    elif [ -f "${KLIPPER_LMNT_CFG}.disabled" ]; then
+        mv "${KLIPPER_LMNT_CFG}.disabled" "${KLIPPER_LMNT_CFG}"
+        echo "Re-enabled ${KLIPPER_LMNT_CFG}"
+    else
+        cat > "${KLIPPER_LMNT_CFG}" <<'EOF'
+# LMNT Marketplace Plugin Klipper configuration
+[encrypted_file_bridge]
+
+[secure_print]
+EOF
+        echo "Wrote ${KLIPPER_LMNT_CFG}"
+    fi
+
+    if [ -f "${CONFIG_DIR}/moonraker.conf" ] && \
+       ! grep -qF '[include extended/moonraker/*.cfg]' "${CONFIG_DIR}/moonraker.conf"; then
+        echo "Warning: moonraker.conf has no [include extended/moonraker/*.cfg]."
+        echo "The PAXX12 extended firmware normally provides that line."
+    fi
+    if [ -f "${CONFIG_DIR}/printer.cfg" ] && \
+       ! grep -qF '[include extended/klipper/*.cfg]' "${CONFIG_DIR}/printer.cfg"; then
+        echo "Warning: printer.cfg has no [include extended/klipper/*.cfg]."
+        echo "The PAXX12 extended firmware normally provides that line."
+    fi
+    if [ -f "${CONFIG_DIR}/moonraker.conf" ] && \
+       grep -q '^\[lmnt_marketplace_plugin\]' "${CONFIG_DIR}/moonraker.conf"; then
+        echo "Warning: moonraker.conf still has [lmnt_marketplace_plugin]."
+        echo "Remove that block. extended/moonraker/lmnt.cfg is the copy that survives a firmware update."
+    fi
+    if [ -f "${CONFIG_DIR}/printer.cfg" ] && \
+       { grep -q '^\[encrypted_file_bridge\]' "${CONFIG_DIR}/printer.cfg" || \
+         grep -q '^\[secure_print\]' "${CONFIG_DIR}/printer.cfg"; }; then
+        echo "Warning: printer.cfg still has [encrypted_file_bridge] or [secure_print]."
+        echo "Remove those sections. extended/klipper/lmnt.cfg is the copy that survives a firmware update."
+    fi
+
+    echo "U1 plugin config is in the extended include directories."
+    echo "Updates stay manual: ${REPO_DIR}/scripts/update.sh"
+else
+
 # Update moonraker.conf
 echo "Updating moonraker.conf..."
 if [ -f "${CONFIG_DIR}/moonraker.conf" ]; then
@@ -399,6 +469,8 @@ if [ -f "${CONFIG_DIR}/printer.cfg" ]; then
 else
     echo "Warning: printer.cfg not found at ${CONFIG_DIR}/printer.cfg"
     echo "Please manually add [encrypted_file_bridge] and [secure_print] to your printer.cfg (ABOVE invalid sections like SAVE_CONFIG)."
+fi
+
 fi
 
 # -------------------------------------------------------------------------

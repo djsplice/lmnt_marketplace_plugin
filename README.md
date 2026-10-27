@@ -135,7 +135,14 @@ mv lmnt_marketplace_plugin-main lmnt_marketplace_plugin
 ./lmnt_marketplace_plugin/scripts/install.sh
 ```
 
-After installation, the plugin is fully persistent across reboots. Firmware updates are the only exception — they wipe `/oem/.debug`, so you must re-run the installer after each firmware update.
+The installer writes the plugin sections into the extended include directories, which survive a firmware update:
+
+- Moonraker: `/oem/printer_data/config/extended/moonraker/lmnt.cfg`
+- Klipper: `/oem/printer_data/config/extended/klipper/lmnt.cfg`
+
+It does not edit `moonraker.conf` or `printer.cfg`. PAXX12 already includes `extended/moonraker/*.cfg` and `extended/klipper/*.cfg`. An existing `lmnt.cfg` is left unchanged. A file named `lmnt.cfg.disabled` is renamed back to `lmnt.cfg`.
+
+After installation, the plugin is fully persistent across reboots. Firmware updates are the only exception — they wipe `/oem/.debug`, so you must re-run the installer after each firmware update. The `lmnt.cfg` files themselves stay in place.
 
 For the complete U1 guide, troubleshooting, and recovery steps, see the **[Snapmaker U1 Installation Guide](docs/snapmaker_u1.md)**.
 

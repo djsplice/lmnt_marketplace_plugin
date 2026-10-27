@@ -123,6 +123,12 @@ else
     echo -e "${YELLOW}Warning: printer.cfg not found at ${CONFIG_DIR}/printer.cfg${NC}"
 fi
 
+# U1 extended includes. These are the copies the installer writes on Snapmaker.
+rm -f "${CONFIG_DIR}/extended/moonraker/lmnt.cfg" \
+      "${CONFIG_DIR}/extended/moonraker/lmnt.cfg.disabled" \
+      "${CONFIG_DIR}/extended/klipper/lmnt.cfg" \
+      "${CONFIG_DIR}/extended/klipper/lmnt.cfg.disabled"
+
 # 6. Remove Plugin Code
 echo "Removing plugin source directory..."
 rm -rf "${PLUGIN_DIR}"
